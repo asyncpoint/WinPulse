@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible WinPulse problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please check existing issues first and avoid including private system information.
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2 / Windows 10 22H2
+    validations:
+      required: true
+  - type: input
+    id: release-version
+    attributes:
+      label: WinPulse version
+      placeholder: v1.0.0 or commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps that trigger the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
