@@ -2,11 +2,12 @@
 
 use std::mem::{size_of, zeroed};
 use std::ptr;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::GetSystemTimes;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_ID: usize = 1;
@@ -134,7 +135,7 @@ fn main() {
 
         // The window owns the state for the lifetime of its message loop.
         let _ = Box::into_raw(state);
-        update_metrics(state_ptr);
+        update_metrics(&mut *state_ptr);
         if SetTimer(hwnd, TIMER_ID, REFRESH_MS, None) == 0 {
             DestroyWindow(hwnd);
             return;
@@ -194,7 +195,9 @@ unsafe extern "system" fn wnd_proc(
                 ID_MODE_HORIZONTAL => set_mode(hwnd, UiMode::Horizontal),
                 ID_MODE_VERTICAL_METERS => set_mode(hwnd, UiMode::VerticalMeters),
                 ID_MODE_STACKED => set_mode(hwnd, UiMode::StackedBars),
-                ID_EXIT => DestroyWindow(hwnd),
+                ID_EXIT => {
+                    DestroyWindow(hwnd);
+                }
                 _ => {}
             }
             0
