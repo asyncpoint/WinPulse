@@ -21,9 +21,9 @@ const BG: u32 = rgb(25, 27, 31);
 const TRACK: u32 = rgb(55, 59, 66);
 const TEXT: u32 = rgb(235, 238, 242);
 const MUTED: u32 = rgb(155, 163, 174);
-const NORMAL_COLOR: u32 = rgb(34, 197, 94);   // Green: 0–60%
+const NORMAL_COLOR: u32 = rgb(34, 197, 94); // Green: 0–60%
 const ELEVATED_COLOR: u32 = rgb(234, 179, 8); // Yellow: >60–<90%
-const HIGH_COLOR: u32 = rgb(239, 68, 68);     // Red: 90–100%
+const HIGH_COLOR: u32 = rgb(239, 68, 68); // Red: 90–100%
 
 // Shared semantic color policy: color communicates utilization, not resource type.
 fn usage_color(value: f32) -> u32 {
@@ -221,7 +221,10 @@ unsafe extern "system" fn wnd_proc(
 unsafe fn initial_position(width: i32, height: i32) -> (i32, i32) {
     let mut work: RECT = zeroed();
     if SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut work as *mut RECT).cast(), 0) != 0 {
-        ((work.right - width - 16).max(work.left), (work.bottom - height - 16).max(work.top))
+        (
+            (work.right - width - 16).max(work.left),
+            (work.bottom - height - 16).max(work.top),
+        )
     } else {
         (100, 100)
     }
@@ -234,17 +237,49 @@ unsafe fn show_context_menu(hwnd: HWND) {
     }
 
     let state = state_ptr(hwnd);
-    let current = if state.is_null() { None } else { Some((*state).mode) };
-    append_menu_item(menu, ID_MODE_HORIZONTAL, "Horizontal floating bar", current == Some(UiMode::Horizontal));
-    append_menu_item(menu, ID_MODE_VERTICAL_METERS, "Vertical meters", current == Some(UiMode::VerticalMeters));
-    append_menu_item(menu, ID_MODE_STACKED, "Stacked horizontal bars", current == Some(UiMode::StackedBars));
+    let current = if state.is_null() {
+        None
+    } else {
+        Some((*state).mode)
+    };
+    append_menu_item(
+        menu,
+        ID_MODE_HORIZONTAL,
+        "Horizontal floating bar",
+        current == Some(UiMode::Horizontal),
+    );
+    append_menu_item(
+        menu,
+        ID_MODE_VERTICAL_METERS,
+        "Vertical meters",
+        current == Some(UiMode::VerticalMeters),
+    );
+    append_menu_item(
+        menu,
+        ID_MODE_STACKED,
+        "Stacked horizontal bars",
+        current == Some(UiMode::StackedBars),
+    );
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
-    AppendMenuW(menu, MF_STRING, ID_EXIT as usize, windows_sys::w!("Exit WinPulse"));
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ID_EXIT as usize,
+        windows_sys::w!("Exit WinPulse"),
+    );
 
     let mut point: POINT = zeroed();
     GetCursorPos(&mut point);
     SetForegroundWindow(hwnd);
-    let selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, ptr::null());
+    let selected = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        ptr::null(),
+    );
     DestroyMenu(menu);
     if selected != 0 {
         SendMessageW(hwnd, WM_COMMAND, selected as usize, 0);
@@ -266,7 +301,15 @@ unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
         (*state).mode = mode;
     }
     let (width, height) = mode.size();
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE);
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        width,
+        height,
+        SWP_NOMOVE | SWP_NOACTIVATE,
+    );
     InvalidateRect(hwnd, ptr::null(), 1);
 }
 
@@ -284,7 +327,8 @@ unsafe fn update_metrics(state: &mut AppState) {
         (&mut idle as *mut u64).cast(),
         (&mut kernel as *mut u64).cast(),
         (&mut user as *mut u64).cast(),
-    ) == 0 {
+    ) == 0
+    {
         return;
     }
 
@@ -295,8 +339,8 @@ unsafe fn update_metrics(state: &mut AppState) {
         let diff_user = user.saturating_sub(state.cpu.user);
         let total = diff_kernel.saturating_add(diff_user);
         if total > 0 && diff_idle <= total {
-            state.cpu_usage = (((total - diff_idle) as f64 * 100.0) / total as f64)
-                .clamp(0.0, 100.0) as f32;
+            state.cpu_usage =
+                (((total - diff_idle) as f64 * 100.0) / total as f64).clamp(0.0, 100.0) as f32;
         }
     }
 
@@ -377,8 +421,24 @@ unsafe fn render_horizontal(hdc: HDC, width: i32, height: i32, state: &AppState)
     let ram_color = usage_color(state.ram_usage);
     draw_label(hdc, left, top + 1, "CPU", cpu_color);
     draw_label(hdc, left, top + row_height + 1, "RAM", ram_color);
-    draw_bar(hdc, bar_left, top + 4, bar_width, 12, state.cpu_usage, cpu_color);
-    draw_bar(hdc, bar_left, top + row_height + 4, bar_width, 12, state.ram_usage, ram_color);
+    draw_bar(
+        hdc,
+        bar_left,
+        top + 4,
+        bar_width,
+        12,
+        state.cpu_usage,
+        cpu_color,
+    );
+    draw_bar(
+        hdc,
+        bar_left,
+        top + row_height + 4,
+        bar_width,
+        12,
+        state.ram_usage,
+        ram_color,
+    );
 }
 
 unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppState) {
@@ -396,10 +456,38 @@ unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppS
     let ram_color = usage_color(state.ram_usage);
     draw_centered_text(hdc, x_cpu + meter_width / 2, 4, "CPU", cpu_color);
     draw_centered_text(hdc, x_ram + meter_width / 2, 4, "RAM", ram_color);
-    draw_vertical_bar(hdc, x_cpu, top, meter_width, meter_height, state.cpu_usage, cpu_color);
-    draw_vertical_bar(hdc, x_ram, top, meter_width, meter_height, state.ram_usage, ram_color);
-    draw_centered_text(hdc, x_cpu + meter_width / 2, bottom + 4, &format!("{:.0}%", state.cpu_usage), cpu_color);
-    draw_centered_text(hdc, x_ram + meter_width / 2, bottom + 4, &format!("{:.0}%", state.ram_usage), ram_color);
+    draw_vertical_bar(
+        hdc,
+        x_cpu,
+        top,
+        meter_width,
+        meter_height,
+        state.cpu_usage,
+        cpu_color,
+    );
+    draw_vertical_bar(
+        hdc,
+        x_ram,
+        top,
+        meter_width,
+        meter_height,
+        state.ram_usage,
+        ram_color,
+    );
+    draw_centered_text(
+        hdc,
+        x_cpu + meter_width / 2,
+        bottom + 4,
+        &format!("{:.0}%", state.cpu_usage),
+        cpu_color,
+    );
+    draw_centered_text(
+        hdc,
+        x_ram + meter_width / 2,
+        bottom + 4,
+        &format!("{:.0}%", state.ram_usage),
+        ram_color,
+    );
 }
 
 unsafe fn render_stacked(hdc: HDC, width: i32, _height: i32, state: &AppState) {
@@ -413,35 +501,77 @@ unsafe fn render_stacked(hdc: HDC, width: i32, _height: i32, state: &AppState) {
     draw_label(hdc, left, 62, "RAM", ram_color);
     draw_bar(hdc, bar_left, 24, bar_width, 14, state.cpu_usage, cpu_color);
     draw_bar(hdc, bar_left, 64, bar_width, 14, state.ram_usage, ram_color);
-    draw_right_text(hdc, width - 10, 22, &format!("{:.0}%", state.cpu_usage), cpu_color);
-    draw_right_text(hdc, width - 10, 62, &format!("{:.0}%", state.ram_usage), ram_color);
+    draw_right_text(
+        hdc,
+        width - 10,
+        22,
+        &format!("{:.0}%", state.cpu_usage),
+        cpu_color,
+    );
+    draw_right_text(
+        hdc,
+        width - 10,
+        62,
+        &format!("{:.0}%", state.ram_usage),
+        ram_color,
+    );
 }
 
 unsafe fn draw_bar(hdc: HDC, x: i32, y: i32, width: i32, height: i32, value: f32, color: u32) {
     let track = CreateSolidBrush(TRACK);
-    let track_rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
+    let track_rect = RECT {
+        left: x,
+        top: y,
+        right: x + width,
+        bottom: y + height,
+    };
     FillRect(hdc, &track_rect, track);
     DeleteObject(track);
 
-    let fill_width = ((width as f32 * value.clamp(0.0, 100.0) / 100.0).round() as i32).clamp(0, width);
+    let fill_width =
+        ((width as f32 * value.clamp(0.0, 100.0) / 100.0).round() as i32).clamp(0, width);
     if fill_width > 0 {
         let fill = CreateSolidBrush(color);
-        let fill_rect = RECT { left: x, top: y, right: x + fill_width, bottom: y + height };
+        let fill_rect = RECT {
+            left: x,
+            top: y,
+            right: x + fill_width,
+            bottom: y + height,
+        };
         FillRect(hdc, &fill_rect, fill);
         DeleteObject(fill);
     }
 }
 
-unsafe fn draw_vertical_bar(hdc: HDC, x: i32, y: i32, width: i32, height: i32, value: f32, color: u32) {
+unsafe fn draw_vertical_bar(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    value: f32,
+    color: u32,
+) {
     let track = CreateSolidBrush(TRACK);
-    let track_rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
+    let track_rect = RECT {
+        left: x,
+        top: y,
+        right: x + width,
+        bottom: y + height,
+    };
     FillRect(hdc, &track_rect, track);
     DeleteObject(track);
 
-    let fill_height = ((height as f32 * value.clamp(0.0, 100.0) / 100.0).round() as i32).clamp(0, height);
+    let fill_height =
+        ((height as f32 * value.clamp(0.0, 100.0) / 100.0).round() as i32).clamp(0, height);
     if fill_height > 0 {
         let fill = CreateSolidBrush(color);
-        let fill_rect = RECT { left: x, top: y + height - fill_height, right: x + width, bottom: y + height };
+        let fill_rect = RECT {
+            left: x,
+            top: y + height - fill_height,
+            right: x + width,
+            bottom: y + height,
+        };
         FillRect(hdc, &fill_rect, fill);
         DeleteObject(fill);
     }
