@@ -1,149 +1,89 @@
 # WinPulse — Design Document
 
-**Status:** Implementation design for the current source revision  
-**Application type:** Native Windows floating system-resource widget  
+**Status:** Expanded implementation candidate; Windows compilation and runtime validation remain required.  
+**Platform:** Windows 10+ 64-bit  
 **Language:** Rust 2024  
-**UI technology:** Win32 windowing and GDI through `windows-sys`
+**UI:** Win32 windowing and GDI through `windows-sys`
 
 ## 1. Purpose
 
-WinPulse provides an unobtrusive, always-on-top view of system-wide CPU utilization and physical-memory load. It is intentionally small: the application avoids a heavyweight GUI framework, browser runtime, background service, and continuous busy loop.
+WinPulse is a compact, native, always-on-top resource widget. It avoids a browser runtime and heavyweight UI framework. It remains a floating window rather than a Windows taskbar toolbar.
 
-The widget is a floating window positioned near the primary display's work-area corner. It is not currently a taskbar toolbar or a taskbar extension.
+## 2. Requirements
 
-## 2. Design goals
+- Display CPU and RAM utilization.
+- Display incoming/outgoing network rates and disk read/write activity by default.
+- Make aggregate disk-space usage optional and disabled by default.
+- Show GPU utilization when a supported provider can supply it; show `N/A` otherwise.
+- Allow GPU visibility to be toggled independently from monitoring capability.
+- Use consistent semantic utilization colors: green below 70%, yellow from 70% to below 90%, red from 90% upward.
+- Support horizontal, vertical-meter, and stacked layouts.
+- Keep size-focused release optimization enabled.
 
-1. Keep idle CPU and memory overhead low.
-2. Use native Windows APIs and avoid unnecessary runtime dependencies.
-3. Refresh resource readings at a modest, predictable interval.
-4. Offer multiple compact layouts without separate windows or application restarts.
-5. Keep the interaction discoverable through a context menu.
-6. Make metric calculations and resource-management behavior straightforward to audit.
-7. Prefer readable values and labeled indicators over color-only communication.
+## 3. UI and interaction
 
-## 3. Non-goals for this revision
+Right-click opens a menu with three layouts, `Show GPU`, `Show disk space`, and `Exit WinPulse`. GPU is visible by default and disk space is hidden by default. The GPU label remains visible as `N/A` when shown but no provider is available. Left-click dragging repositions the window.
 
-- Per-process CPU/RAM monitoring.
-- Historical graphs, alerts, logging, or telemetry upload.
-- Native taskbar toolbar integration.
-- Saving preferences or restoring window position.
-- Full multi-monitor/DPI policy, themes, and user-configurable refresh rates.
-- Installer, auto-start integration, or background Windows service.
+The horizontal and stacked layouts show CPU, RAM, network receive/transmit, disk read/write, and optional disk-space rows. The vertical layout reserves a dedicated label row above CPU/RAM meters and places network/disk/GPU details below them to avoid the prior label overlap. Layout sizing is fixed per mode; dynamic content may require further DPI and small-window validation.
 
-## 4. UI layouts
+## 4. Semantic color policy
 
-The application supports three layouts. The context menu selects a specific layout, rather than cycling through modes, so users can choose either design directly.
+A single `usage_color` function is used for percentage-based metrics:
 
-### 4.1 Horizontal floating bar (default)
+- Green `#22C55E`: below 70%.
+- Yellow `#EAB308`: 70% to below 90%.
+- Red `#EF4444`: 90% and above.
 
-- Approximate client size: 270 × 72 logical pixels.
-- Two rows: CPU and RAM.
-- Each row has a short label and a horizontal bar.
-- Bar tracks remain visible at 0% utilization; colored fill shows the current value.
-- CPU and RAM both use a shared semantic color policy: green through 60%, yellow above 60% and below 90%, and red from 90% upward. Labels identify the resource; color communicates utilization severity.
+The policy applies to CPU, RAM, and optional disk-space percentage. Network throughput and disk I/O rates use neutral text because a rate alone is not a utilization percentage.
 
-### 4.2 Vertical meters
+## 5. Monitoring modules
 
-- Approximate client size: 112 × 174 logical pixels.
-- Two vertical tracks side by side.
-- Fill rises from the bottom of each track.
-- CPU and RAM labels appear above the meters; percentages appear below.
-- Intended for a narrow desktop edge or corner.
+### `monitoring/network.rs`
 
-### 4.3 Stacked horizontal bars
+Refreshes `sysinfo::Networks`, aggregates cumulative received/transmitted byte counters over discovered interfaces, and calculates deltas against the previous sample. The first sample establishes a baseline. Interface aggregation may include virtual adapters, so totals can differ from a single physical adapter's counters.
 
-- Approximate client size: 260 × 104 logical pixels.
-- Two horizontally filled rows with labels and numeric percentages.
-- Numeric values sit at the right edge, favoring readability over the smallest footprint.
+### `monitoring/disk.rs`
 
-All layouts share the same metrics and semantic usage-color thresholds. CPU and RAM are colored independently based on their current readings. Layout changes resize the existing window without resetting the metrics or creating another window.
+Refreshes discovered disks and aggregates interval read/write byte deltas, total capacity, and available capacity. Disk activity is on by default. Disk-space display is optional and currently aggregates all discovered disks; per-drive selection and exclusion rules are future work.
 
-## 4.4 Semantic usage colors
+### `monitoring/gpu.rs`
 
-All resource indicators use the same thresholds regardless of resource type:
+Defines the provider boundary and returns `None` in this revision. The UI renders `N/A`, never a fabricated `0%`. A production GPU provider still needs to enumerate Windows PDH `GPU Engine` counters, handle wildcard instances and multiple adapters, aggregate usage without double-counting engines, and validate behavior across supported Windows/driver combinations. GPU percentage monitoring must not be described as implemented until this provider exists and is tested.
 
-- Green (`#22C55E`): 0–60%, inclusive.
-- Yellow (`#EAB308`): greater than 60% and less than 90%.
-- Red (`#EF4444`): 90–100%, inclusive.
+## 6. CPU and RAM
 
-The shared `usage_color` function applies this policy consistently to labels, bars/meters, and percentage text. CPU and RAM change independently. The neutral background track remains constant. High utilization is an attention cue, not proof of a fault.
+CPU utilization uses deltas from `GetSystemTimes`; the first valid sample is a baseline. RAM uses `GlobalMemoryStatusEx::dwMemoryLoad`. Failed reads preserve the last valid CPU/RAM sample.
 
-## 5. Interaction model
+## 7. Refresh policy and overhead
 
-| Input | Behavior |
-|---|---|
-| Left-click and drag | Move the borderless widget using the native non-client drag behavior |
-| Right-click | Open a context menu |
-| Select a layout | Change layout and resize the window |
-| Exit WinPulse | Destroy the window and stop the message loop |
-| Timer tick | Refresh metrics and invalidate the client area |
+A Win32 timer updates readings approximately once per second. Network and disk rates are derived from counter deltas at that interval. No dedicated busy loop is used. `sysinfo` is added for network and disk enumeration/counters; this adds a dependency and the actual executable size should be measured rather than assumed.
 
-The selected layout is checked in the context menu. The implemented menu contains the three layout choices and Exit. The window uses `WS_EX_TOPMOST` to remain above normal windows and `WS_EX_TOOLWINDOW` to avoid a regular taskbar button. There is no menu item for toggling topmost behavior.
+## 8. Architecture
 
-## 6. Metrics and sampling
+- `main.rs`: window lifecycle, state, CPU/RAM sampling, context menu, drawing, and shared presentation helpers.
+- `monitoring/network.rs`: network rates.
+- `monitoring/disk.rs`: disk activity and capacity.
+- `monitoring/gpu.rs`: optional GPU provider interface and unavailable fallback.
 
-### 6.1 CPU
+Further separation of Win32 rendering and CPU/memory sampling is possible if the code grows. Each monitor module is independent to support provider replacement and focused testing.
 
-`GetSystemTimes` supplies cumulative idle, kernel, and user time counters. The first successful read is stored as the baseline. Each later reading computes counter deltas:
+## 9. Known limitations
 
-`total = Δkernel + Δuser`
+- GPU counter integration is not implemented yet; the indicator is therefore `N/A` until a provider is added.
+- Disk-space monitoring is aggregate only; per-drive choice and custom thresholds are not implemented.
+- Preferences are not persisted between runs.
+- Network totals may include virtual interfaces.
+- GPU multi-engine aggregation, per-drive selection, DPI awareness, multi-monitor placement, and runtime behavior require Windows testing.
+- A Cargo lockfile should be generated and committed before release.
 
-`busy = total − Δidle`
+## 10. Build and validation
 
-`CPU % = 100 × busy / total`
+The release profile uses `opt-level = "z"`, LTO, one codegen unit, panic abort, and symbol stripping. Build on Windows with Rust MSVC and run:
 
-The result is updated only when the total delta is positive and the idle delta does not exceed the total. The displayed result is clamped to 0–100%. Saturating subtraction avoids underflow if counters unexpectedly move backwards.
+```powershell
+cargo fmt --all -- --check
+cargo check --release --target x86_64-pc-windows-msvc
+cargo build --release --target x86_64-pc-windows-msvc
+```
 
-### 6.2 Memory
-
-`GlobalMemoryStatusEx` supplies `dwMemoryLoad`, the Windows-reported percentage of physical memory in use. The value is clamped to 0–100%. The UI does not currently show exact used/total memory sizes.
-
-### 6.3 Refresh policy
-
-A Win32 timer fires every 1,000 milliseconds. It updates metrics and invalidates the window for repaint. There is no explicit polling thread or busy loop.
-
-## 7. Architecture
-
-The current implementation remains in `src/main.rs` to keep the project easy to build and distribute. Its responsibilities are separated into functions:
-
-- **Application startup:** register the window class, create the initial state and window, and run the message loop.
-- **Window procedure:** route timer, mouse, menu, paint, and destroy messages.
-- **Application state:** hold the selected layout, latest metric values, and CPU sampling baseline. The state is owned by a `Box` and attached to the window through `GWLP_USERDATA`.
-- **Metrics:** `update_metrics` samples system APIs and validates CPU deltas.
-- **Rendering:** each layout has its own renderer. Shared helpers draw tracks, fills, labels, and percentages.
-- **Context menu:** users can select any of the three layouts or exit.
-
-A future change can split these responsibilities into modules if configuration or more metrics make the single source file difficult to maintain. That split is not necessary solely for this revision.
-
-## 8. Rendering and resource management
-
-- GDI drawing uses a compatible memory DC and bitmap for buffered painting.
-- The background is painted by the application; `WM_ERASEBKGND` reports handled to reduce redundant erasure.
-- Brushes, the bitmap, and the memory DC are released after painting.
-- GDI creation failures are checked before the relevant handles are used; painting can fall back to direct background fill if the memory DC cannot be created.
-- `COLORREF` values are composed with red in the least-significant byte, green in the next byte, and blue in the third byte.
-
-## 9. Failure handling
-
-Startup stops if the module handle, window class registration, or window creation fails. The timer is checked; if it cannot be created, the window is destroyed and the application exits. Failed metric API calls leave the last valid reading in place rather than replacing it with fabricated values.
-
-Further hardening opportunities include diagnostics for startup failures, a small testable CPU-delta helper, and explicit fallback handling for all individual GDI object creation failures.
-
-## 10. Build and release
-
-The crate uses Rust 2024 and `windows-sys` 0.59 with Win32 Foundation, System Information, Threading, Library Loader, Windows and Messaging, and GDI feature flags. The release profile favors a small binary through size optimization (`opt-level = "z"`), link-time optimization (`lto = true`), LTO, a single codegen unit, panic abort, and symbol stripping.
-
-The GitHub Actions workflow checks formatting, performs a release-mode compile check, builds the optimized x64 executable, uploads a workflow artifact, and attaches the executable to GitHub Releases for version tags (`v*`). Before publishing a release, build and test on Windows with the intended Rust/MSVC toolchain and commit the generated `Cargo.lock` so dependency resolution is reproducible. Do not promise a specific executable size or memory footprint without measuring the produced artifact and running it on representative systems.
-
-## 11. Validation checklist
-
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo check --release` on Windows MSVC
-- [ ] `cargo build --release` on Windows MSVC
-- [ ] Verify all three menu options and the checked state
-- [ ] Verify left-click dragging and Exit behavior
-- [ ] Verify CPU baseline and changing CPU load over multiple samples
-- [ ] Verify RAM reading against Windows Task Manager
-- [ ] Leave the widget running for several hours and inspect CPU, memory, and GDI object counts
-- [ ] Test different resolutions and scaling settings; record remaining DPI/multi-monitor limitations
-- [ ] Measure release executable size instead of relying on an estimated figure
+Smoke-test all layouts, context menu toggles, dragging, exit, CPU/RAM changes, network traffic, disk activity, disk-space visibility, and the `GPU N/A` fallback. Measure binary size and resource use on the resulting executable. Do not publish a release until the Windows build succeeds.

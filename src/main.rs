@@ -2,6 +2,9 @@
 
 use std::mem::{size_of, zeroed};
 use std::ptr;
+use sysinfo::{Disks, Networks, System};
+mod monitoring;
+use monitoring::{disk, gpu, network};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -15,6 +18,8 @@ const REFRESH_MS: u32 = 1000;
 const ID_MODE_HORIZONTAL: u16 = 1001;
 const ID_MODE_VERTICAL_METERS: u16 = 1002;
 const ID_MODE_STACKED: u16 = 1003;
+const ID_TOGGLE_GPU: u16 = 1010;
+const ID_TOGGLE_DISK_SPACE: u16 = 1011;
 const ID_EXIT: u16 = 1099;
 const CLASS_NAME: windows_sys::core::PCWSTR = windows_sys::w!("WinPulseNativeClass");
 
@@ -22,15 +27,15 @@ const BG: u32 = rgb(25, 27, 31);
 const TRACK: u32 = rgb(55, 59, 66);
 const TEXT: u32 = rgb(235, 238, 242);
 const MUTED: u32 = rgb(155, 163, 174);
-const NORMAL_COLOR: u32 = rgb(34, 197, 94); // Green: 0–60%
-const ELEVATED_COLOR: u32 = rgb(234, 179, 8); // Yellow: >60–<90%
+const NORMAL_COLOR: u32 = rgb(34, 197, 94); // Green: <70%
+const ELEVATED_COLOR: u32 = rgb(234, 179, 8); // Yellow: 70–<90%
 const HIGH_COLOR: u32 = rgb(239, 68, 68); // Red: 90–100%
 
 // Shared semantic color policy: color communicates utilization, not resource type.
 fn usage_color(value: f32) -> u32 {
     if value >= 90.0 {
         HIGH_COLOR
-    } else if value > 60.0 {
+    } else if value >= 70.0 {
         ELEVATED_COLOR
     } else {
         NORMAL_COLOR
@@ -52,9 +57,9 @@ enum UiMode {
 impl UiMode {
     fn size(self) -> (i32, i32) {
         match self {
-            Self::Horizontal => (270, 72),
-            Self::VerticalMeters => (112, 174),
-            Self::StackedBars => (260, 104),
+            Self::Horizontal => (360, 190),
+            Self::VerticalMeters => (240, 310),
+            Self::StackedBars => (340, 210),
         }
     }
 }
@@ -71,7 +76,21 @@ struct AppState {
     mode: UiMode,
     cpu_usage: f32,
     ram_usage: f32,
+    net_in_bps: u64,
+    net_out_bps: u64,
+    disk_read_bps: u64,
+    disk_write_bps: u64,
+    disk_used_percent: f32,
+    disk_used_bytes: u64,
+    disk_total_bytes: u64,
+    gpu_usage: Option<f32>,
+    show_gpu: bool,
+    show_disk_space: bool,
     cpu: CpuCounters,
+    system: System,
+    networks: Networks,
+    disks: Disks,
+    previous_net: Option<(u64, u64)>,
 }
 
 impl Default for AppState {
@@ -80,7 +99,21 @@ impl Default for AppState {
             mode: UiMode::Horizontal,
             cpu_usage: 0.0,
             ram_usage: 0.0,
+            net_in_bps: 0,
+            net_out_bps: 0,
+            disk_read_bps: 0,
+            disk_write_bps: 0,
+            disk_used_percent: 0.0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 0,
+            gpu_usage: None,
+            show_gpu: true,
+            show_disk_space: false,
             cpu: CpuCounters::default(),
+            system: System::new(),
+            networks: Networks::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
+            previous_net: None,
         }
     }
 }
@@ -195,6 +228,8 @@ unsafe extern "system" fn wnd_proc(
                 ID_MODE_HORIZONTAL => set_mode(hwnd, UiMode::Horizontal),
                 ID_MODE_VERTICAL_METERS => set_mode(hwnd, UiMode::VerticalMeters),
                 ID_MODE_STACKED => set_mode(hwnd, UiMode::StackedBars),
+                ID_TOGGLE_GPU => toggle_option(hwnd, true),
+                ID_TOGGLE_DISK_SPACE => toggle_option(hwnd, false),
                 ID_EXIT => {
                     DestroyWindow(hwnd);
                 }
@@ -264,6 +299,19 @@ unsafe fn show_context_menu(hwnd: HWND) {
         current == Some(UiMode::StackedBars),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+    let (show_gpu, show_space) = if state.is_null() {
+        (true, false)
+    } else {
+        ((*state).show_gpu, (*state).show_disk_space)
+    };
+    append_menu_item(
+        menu,
+        ID_TOGGLE_GPU,
+        "Show GPU (N/A if unavailable)",
+        show_gpu,
+    );
+    append_menu_item(menu, ID_TOGGLE_DISK_SPACE, "Show disk space", show_space);
+    AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     AppendMenuW(
         menu,
         MF_STRING,
@@ -298,6 +346,29 @@ unsafe fn append_menu_item(menu: HMENU, id: u16, label: &'static str, checked: b
     AppendMenuW(menu, flags, id as usize, wide.as_ptr());
 }
 
+unsafe fn toggle_option(hwnd: HWND, gpu: bool) {
+    let state = state_ptr(hwnd);
+    if state.is_null() {
+        return;
+    }
+    if gpu {
+        (*state).show_gpu = !(*state).show_gpu;
+    } else {
+        (*state).show_disk_space = !(*state).show_disk_space;
+    }
+    let (width, height) = (*state).mode.size();
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        width,
+        height,
+        SWP_NOMOVE | SWP_NOACTIVATE,
+    );
+    InvalidateRect(hwnd, ptr::null(), 1);
+}
+
 unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
     let state = state_ptr(hwnd);
     if !state.is_null() {
@@ -322,6 +393,20 @@ unsafe fn update_metrics(state: &mut AppState) {
     if GlobalMemoryStatusEx(&mut mem_info) != 0 {
         state.ram_usage = (mem_info.dwMemoryLoad as f32).clamp(0.0, 100.0);
     }
+
+    // Resource providers are isolated by metric type for easier maintenance.
+    state.system.refresh_memory();
+    let net = network::sample(&mut state.networks, &mut state.previous_net);
+    state.net_in_bps = net.received_bytes_per_sec;
+    state.net_out_bps = net.transmitted_bytes_per_sec;
+
+    let disk_metrics = disk::sample(&mut state.disks);
+    state.disk_read_bps = disk_metrics.read_bytes_per_sec;
+    state.disk_write_bps = disk_metrics.written_bytes_per_sec;
+    state.disk_total_bytes = disk_metrics.total_bytes;
+    state.disk_used_bytes = disk_metrics.used_bytes;
+    state.disk_used_percent = disk_metrics.used_percent;
+    state.gpu_usage = gpu::sample();
 
     let mut idle: u64 = 0;
     let mut kernel: u64 = 0;
@@ -412,112 +497,204 @@ unsafe fn paint(hwnd: HWND) {
     EndPaint(hwnd, &ps);
 }
 
-unsafe fn render_horizontal(hdc: HDC, width: i32, height: i32, state: &AppState) {
-    let left = 12;
-    let label_w = 42;
-    let right = width - 12;
-    let bar_left = left + label_w;
-    let bar_width = (right - bar_left).max(20);
-    let row_height = 22;
-    let top = ((height - row_height * 2) / 2).max(5);
-    let cpu_color = usage_color(state.cpu_usage);
-    let ram_color = usage_color(state.ram_usage);
-    draw_label(hdc, left, top + 1, "CPU", cpu_color);
-    draw_label(hdc, left, top + row_height + 1, "RAM", ram_color);
-    draw_bar(
+unsafe fn render_horizontal(hdc: HDC, width: i32, _height: i32, state: &AppState) {
+    let mut y = 10;
+    draw_metric_row(
         hdc,
-        bar_left,
-        top + 4,
-        bar_width,
-        12,
+        width,
+        y,
+        "CPU",
+        format!("{:.0}%", state.cpu_usage),
+        Some(state.cpu_usage),
         state.cpu_usage,
-        cpu_color,
     );
-    draw_bar(
+    y += 24;
+    draw_metric_row(
         hdc,
-        bar_left,
-        top + row_height + 4,
-        bar_width,
-        12,
+        width,
+        y,
+        "RAM",
+        format!("{:.0}%", state.ram_usage),
+        Some(state.ram_usage),
         state.ram_usage,
-        ram_color,
     );
-}
-
-unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppState) {
-    let top = 12;
-    let bottom = height - 30;
-    let meter_height = (bottom - top).max(20);
-    let meter_width = 28;
-    let gap = 16;
-    let total_width = meter_width * 2 + gap;
-    let start_x = ((width - total_width) / 2).max(8);
-    let x_cpu = start_x;
-    let x_ram = start_x + meter_width + gap;
-
-    let cpu_color = usage_color(state.cpu_usage);
-    let ram_color = usage_color(state.ram_usage);
-    draw_centered_text(hdc, x_cpu + meter_width / 2, 4, "CPU", cpu_color);
-    draw_centered_text(hdc, x_ram + meter_width / 2, 4, "RAM", ram_color);
-    draw_vertical_bar(
+    y += 24;
+    draw_metric_row(
         hdc,
-        x_cpu,
-        top,
-        meter_width,
-        meter_height,
-        state.cpu_usage,
-        cpu_color,
+        width,
+        y,
+        "NET IN",
+        format_rate(state.net_in_bps),
+        None,
+        0.0,
     );
-    draw_vertical_bar(
+    y += 24;
+    draw_metric_row(
         hdc,
-        x_ram,
-        top,
-        meter_width,
-        meter_height,
-        state.ram_usage,
-        ram_color,
+        width,
+        y,
+        "NET OUT",
+        format_rate(state.net_out_bps),
+        None,
+        0.0,
     );
-    draw_centered_text(
+    y += 24;
+    draw_metric_row(
         hdc,
-        x_cpu + meter_width / 2,
-        bottom + 4,
-        &format!("{:.0}%", state.cpu_usage),
-        cpu_color,
+        width,
+        y,
+        "DISK R/W",
+        format!(
+            "{}/{}",
+            format_rate(state.disk_read_bps),
+            format_rate(state.disk_write_bps)
+        ),
+        None,
+        0.0,
     );
-    draw_centered_text(
-        hdc,
-        x_ram + meter_width / 2,
-        bottom + 4,
-        &format!("{:.0}%", state.ram_usage),
-        ram_color,
-    );
+    y += 24;
+    if state.show_disk_space {
+        draw_metric_row(
+            hdc,
+            width,
+            y,
+            "DISK",
+            format!("{:.0}% used", state.disk_used_percent),
+            Some(state.disk_used_percent),
+            state.disk_used_percent,
+        );
+        y += 24;
+    }
+    if state.show_gpu {
+        let (value, pct) = match state.gpu_usage {
+            Some(v) => (format!("{v:.0}%"), Some(v)),
+            None => ("N/A".to_string(), None),
+        };
+        draw_metric_row(
+            hdc,
+            width,
+            y,
+            "GPU",
+            value,
+            pct,
+            state.gpu_usage.unwrap_or(0.0),
+        );
+    }
 }
 
 unsafe fn render_stacked(hdc: HDC, width: i32, _height: i32, state: &AppState) {
-    let left = 14;
-    let label_width = 48;
-    let bar_left = left + label_width;
-    let bar_width = (width - bar_left - 48).max(24);
-    let cpu_color = usage_color(state.cpu_usage);
-    let ram_color = usage_color(state.ram_usage);
-    draw_label(hdc, left, 22, "CPU", cpu_color);
-    draw_label(hdc, left, 62, "RAM", ram_color);
-    draw_bar(hdc, bar_left, 24, bar_width, 14, state.cpu_usage, cpu_color);
-    draw_bar(hdc, bar_left, 64, bar_width, 14, state.ram_usage, ram_color);
-    draw_right_text(
+    render_horizontal(hdc, width, 0, state);
+}
+
+unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppState) {
+    // Labels occupy a dedicated row; bars start below them, avoiding the previous overlap.
+    let metrics: Vec<(&str, f32)> = vec![("CPU", state.cpu_usage), ("RAM", state.ram_usage)];
+    let top = 30;
+    let bottom = 145;
+    let meter_height = (bottom - top).max(20);
+    let meter_width = 42;
+    let gap = 26;
+    let total_width = meter_width * 2 + gap;
+    let start_x = ((width - total_width) / 2).max(8);
+    for (i, (label, value)) in metrics.iter().enumerate() {
+        let x = start_x + i as i32 * (meter_width + gap);
+        let color = usage_color(*value);
+        draw_centered_text(hdc, x + meter_width / 2, 8, label, TEXT);
+        draw_vertical_bar(hdc, x, top, meter_width, meter_height, *value, color);
+        draw_centered_text(
+            hdc,
+            x + meter_width / 2,
+            bottom + 4,
+            &format!("{value:.0}%"),
+            color,
+        );
+    }
+    let mut y = 176;
+    draw_label(
         hdc,
-        width - 10,
-        22,
-        &format!("{:.0}%", state.cpu_usage),
-        cpu_color,
+        12,
+        y,
+        &format!("IN  {}", format_rate(state.net_in_bps)),
+        TEXT,
     );
-    draw_right_text(
+    y += 18;
+    draw_label(
         hdc,
-        width - 10,
-        62,
-        &format!("{:.0}%", state.ram_usage),
-        ram_color,
+        12,
+        y,
+        &format!("OUT {}", format_rate(state.net_out_bps)),
+        TEXT,
     );
+    y += 18;
+    draw_label(
+        hdc,
+        12,
+        y,
+        &format!(
+            "DISK R/W {}/{}",
+            format_rate(state.disk_read_bps),
+            format_rate(state.disk_write_bps)
+        ),
+        TEXT,
+    );
+    y += 18;
+    if state.show_disk_space {
+        draw_label(
+            hdc,
+            12,
+            y,
+            &format!("SPACE {:.0}% used", state.disk_used_percent),
+            usage_color(state.disk_used_percent),
+        );
+        y += 18;
+    }
+    if state.show_gpu {
+        let gpu_text = state
+            .gpu_usage
+            .map(|v| format!("GPU {v:.0}%"))
+            .unwrap_or_else(|| "GPU N/A".to_string());
+        draw_label(
+            hdc,
+            12,
+            y,
+            &gpu_text,
+            state.gpu_usage.map(usage_color).unwrap_or(MUTED),
+        );
+    }
+}
+
+unsafe fn draw_metric_row(
+    hdc: HDC,
+    width: i32,
+    y: i32,
+    label: &str,
+    value: String,
+    utilization: Option<f32>,
+    _unused: f32,
+) {
+    let left = 12;
+    let label_width = 66;
+    let value_width = 82;
+    let bar_x = left + label_width;
+    let bar_width = (width - bar_x - value_width - 14).max(24);
+    let color = utilization.map(usage_color).unwrap_or(TEXT);
+    draw_label(hdc, left, y + 1, label, TEXT);
+    if let Some(v) = utilization {
+        draw_bar(hdc, bar_x, y + 3, bar_width, 12, v, usage_color(v));
+    } else {
+        draw_bar(hdc, bar_x, y + 3, bar_width, 12, 0.0, TRACK);
+    }
+    draw_right_text(hdc, width - 10, y + 1, &value, color);
+}
+
+fn format_rate(bytes_per_second: u64) -> String {
+    if bytes_per_second >= 1024 * 1024 {
+        format!("{:.1} MB/s", bytes_per_second as f64 / (1024.0 * 1024.0))
+    } else if bytes_per_second >= 1024 {
+        format!("{:.0} KB/s", bytes_per_second as f64 / 1024.0)
+    } else {
+        format!("{} B/s", bytes_per_second)
+    }
 }
 
 unsafe fn draw_bar(hdc: HDC, x: i32, y: i32, width: i32, height: i32, value: f32, color: u32) {

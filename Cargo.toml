@@ -2,11 +2,14 @@
 name = "winpulse"
 version = "1.0.0"
 edition = "2024"
-description = "A lightweight native Windows CPU and memory monitor"
+description = "A lightweight native Windows system resource monitor"
 readme = "README.md"
 license = "MIT"
-keywords = ["windows", "system-monitor", "cpu", "memory", "native"]
+keywords = ["windows", "system-monitor", "cpu", "memory", "network", "disk", "native"]
 categories = ["visualization"]
+
+[dependencies]
+sysinfo = { version = "0.33", default-features = false, features = ["system", "network", "disk"] }
 
 [dependencies.windows-sys]
 version = "0.59"
