@@ -9,7 +9,7 @@ pub struct NetworkRates {
 /// Calculate traffic rates from cumulative interface byte counters.
 /// The first call establishes a baseline and returns zero rates.
 pub fn sample(networks: &mut Networks, previous: &mut Option<(u64, u64)>) -> NetworkRates {
-    networks.refresh();
+    networks.refresh(true);
     let mut received = 0u64;
     let mut transmitted = 0u64;
     for (_name, data) in networks.iter() {
