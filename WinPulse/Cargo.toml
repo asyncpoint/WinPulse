@@ -1,0 +1,32 @@
+[package]
+name = "winpulse"
+version = "1.0.0"
+edition = "2024"
+description = "A lightweight native Windows system resource monitor"
+readme = "README.md"
+license = "MIT"
+keywords = ["windows", "system-monitor", "cpu", "memory", "network", "disk", "native"]
+categories = ["visualization"]
+
+[dependencies]
+sysinfo = { version = "0.33", default-features = false, features = ["system", "network", "disk"] }
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+]
+
+[profile.release]
+opt-level = "z"       # Optimize for binary size
+lto = true             # Link-time optimization
+codegen-units = 1      # Improve whole-program optimization
+panic = "abort"       # Avoid unwinding support in release builds
+strip = true           # Strip symbols from the release binary
