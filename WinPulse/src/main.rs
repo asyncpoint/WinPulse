@@ -19,7 +19,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const TIMER_ID: usize = 1;
 const REFRESH_MS: u32 = 1000;
 const ID_MODE_HORIZONTAL: u16 = 1001;
-const ID_MODE_VERTICAL_METERS: u16 = 1002;
 const ID_OPACITY_20: u16 = 1020;
 const ID_OPACITY_40: u16 = 1021;
 const ID_OPACITY_60: u16 = 1022;
@@ -55,29 +54,15 @@ const fn rgb(r: u32, g: u32, b: u32) -> u32 {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum UiMode {
-    Horizontal,
-    VerticalMeters,
-
-}
+enum UiMode { Horizontal }
 
 impl UiMode {
     fn size(self, state: &AppState) -> (i32, i32) {
-        // Size to the active controls only; no reserved space for hidden metrics.
-        match self {
-            Self::Horizontal => (420, 20 + visible_row_count(state) as i32 * 25),
-            Self::VerticalMeters => {
-                let rows = visible_row_count(state) as i32;
-                (360, 190 + rows * 22)
-            }
-        }
+        // Four fixed rows (CPU, RAM, Network, Disk I/O), plus enabled optional rows.
+        // The renderer starts at y=10 and advances by 25px per row.
+        let rows = 4 + usize::from(state.show_disk_space) + usize::from(state.show_gpu);
+        (420, 10 + rows as i32 * 25)
     }
-}
-
-fn visible_row_count(state: &AppState) -> usize {
-    // CPU and RAM plus four throughput rows are always present.
-    6 + usize::from(state.show_disk_space) + usize::from(state.show_gpu)
-}
 }
 
 #[derive(Default)]
@@ -130,7 +115,7 @@ impl Default for AppState {
             disk_total_bytes: 0,
             disk_label: "DISK".to_string(),
             gpu_usage: None,
-            show_gpu: true,
+            show_gpu: false,
             show_disk_space: false,
             cpu: CpuCounters::default(),
             system: System::new(),
@@ -268,7 +253,6 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             match (wparam & 0xffff) as u16 {
                 ID_MODE_HORIZONTAL => set_mode(hwnd, UiMode::Horizontal),
-                ID_MODE_VERTICAL_METERS => set_mode(hwnd, UiMode::VerticalMeters),
                 ID_OPACITY_20 => set_opacity(hwnd, 20),
                 ID_OPACITY_40 => set_opacity(hwnd, 40),
                 ID_OPACITY_60 => set_opacity(hwnd, 60),
@@ -340,10 +324,9 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     let state = state_ptr(hwnd);
     let current = if state.is_null() { None } else { Some((*state).mode) };
-    append_menu_item(menu, ID_MODE_HORIZONTAL, "Horizontal bars", current == Some(UiMode::Horizontal));
-    append_menu_item(menu, ID_MODE_VERTICAL_METERS, "Vertical Bars", current == Some(UiMode::VerticalMeters));
+    append_menu_item(menu, ID_MODE_HORIZONTAL, "Horizontal bars", true);
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
-    let (show_gpu, show_space) = if state.is_null() { (true, false) } else { ((*state).show_gpu, (*state).show_disk_space) };
+    let (show_gpu, show_space) = if state.is_null() { (false, false) } else { ((*state).show_gpu, (*state).show_disk_space) };
     append_menu_item(menu, ID_TOGGLE_GPU, "Show GPU (N/A if unavailable)", show_gpu);
     append_menu_item(menu, ID_TOGGLE_DISK_SPACE, "Show disk space", show_space);
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -411,6 +394,8 @@ unsafe fn resize_to_content(hwnd: HWND, state: &AppState) {
     let x = r.left.clamp(work.left, (work.right - width).max(work.left));
     let y = r.top.clamp(work.top, (work.bottom - height).max(work.top));
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    apply_window_opacity(hwnd, state.opacity);
+    InvalidateRect(hwnd, ptr::null(), 1);
 }
 
 unsafe fn set_opacity(hwnd: HWND, opacity: u8) {
@@ -475,75 +460,19 @@ unsafe fn update_metrics(state: &mut AppState) {
 
 unsafe fn paint(hwnd: HWND) {
     let mut ps: PAINTSTRUCT = zeroed();
-    let paint_dc = BeginPaint(hwnd, &mut ps);
-    if paint_dc.is_null() { EndPaint(hwnd, &ps); return; }
-
+    let hdc = BeginPaint(hwnd, &mut ps);
+    if hdc.is_null() { EndPaint(hwnd, &ps); return; }
     let mut rect: RECT = zeroed();
     GetClientRect(hwnd, &mut rect);
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
-    if width <= 0 || height <= 0 { EndPaint(hwnd, &ps); return; }
-
-    // Render directly into a 32-bit DIB. Compatible bitmaps/BitBlt do not reliably
-    // preserve the alpha channel required by UpdateLayeredWindow.
-    let mut bmi: BITMAPINFO = zeroed();
-    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    let mut bits: *mut core::ffi::c_void = ptr::null_mut();
-    let dib = CreateDIBSection(paint_dc, &bmi, DIB_RGB_COLORS, &mut bits, ptr::null_mut(), 0);
-    if dib.is_null() || bits.is_null() { EndPaint(hwnd, &ps); return; }
-    let dib_dc = CreateCompatibleDC(paint_dc);
-    if dib_dc.is_null() { DeleteObject(dib); EndPaint(hwnd, &ps); return; }
-    let old = SelectObject(dib_dc, dib);
-
-    let bg_brush = CreateSolidBrush(BG);
-    FillRect(dib_dc, &rect, bg_brush);
-    DeleteObject(bg_brush);
-    let state = state_ptr(hwnd);
-    if !state.is_null() {
-        match (*state).mode {
-            UiMode::Horizontal => render_horizontal(dib_dc, width, height, &*state),
-            UiMode::VerticalMeters => render_vertical_meters(dib_dc, width, height, &*state),
-        }
+    if width > 0 && height > 0 {
+        let bg_brush = CreateSolidBrush(BG);
+        FillRect(hdc, &rect, bg_brush);
+        DeleteObject(bg_brush);
+        let state = state_ptr(hwnd);
+        if !state.is_null() { render_horizontal(hdc, width, height, &*state); }
     }
-
-    // DIB pixels are 0x00RRGGBB; COLORREF is 0x00BBGGRR. Match only the panel's
-    // exact background color, so text, tracks and usage bars remain fully opaque.
-    let bg_pixel = ((BG & 0xff) << 16) | (BG & 0xff00) | ((BG >> 16) & 0xff);
-    let opacity = if state.is_null() { 80u8 } else { (*state).opacity };
-    let alpha = (opacity as u32 * 255 / 100).clamp(1, 255);
-    let pixels = bits as *mut u32;
-    for i in 0..(width * height) as usize {
-        let pixel = *pixels.add(i) & 0x00ff_ffff;
-        if pixel == bg_pixel {
-            let r = (pixel >> 16) & 0xff;
-            let g = (pixel >> 8) & 0xff;
-            let b = pixel & 0xff;
-            *pixels.add(i) = (alpha << 24) | ((r * alpha / 255) << 16)
-                | ((g * alpha / 255) << 8) | (b * alpha / 255);
-        } else {
-            *pixels.add(i) = 0xff00_0000 | pixel;
-        }
-    }
-
-    let mut dst = POINT { x: 0, y: 0 };
-    let mut src = POINT { x: 0, y: 0 };
-    let size = SIZE { cx: width, cy: height };
-    let mut blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0,
-        SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-    let mut wnd_rect: RECT = zeroed();
-    GetWindowRect(hwnd, &mut wnd_rect);
-    dst.x = wnd_rect.left; dst.y = wnd_rect.top;
-    let _ = UpdateLayeredWindow(hwnd, ptr::null_mut(), &mut dst, &size, dib_dc,
-        &mut src, 0, &mut blend, ULW_ALPHA);
-
-    SelectObject(dib_dc, old);
-    DeleteDC(dib_dc);
-    DeleteObject(dib);
     EndPaint(hwnd, &ps);
 }
 
@@ -551,10 +480,10 @@ unsafe fn render_horizontal(hdc: HDC, width: i32, _height: i32, state: &AppState
     let mut y = 10;
     draw_metric_row(hdc, width, y, "CPU", format!("{:.0}%", state.cpu_usage), Some(state.cpu_usage), state.cpu_usage); y += 25;
     draw_metric_row(hdc, width, y, "RAM", format!("{:.0}%", state.ram_usage), Some(state.ram_usage), state.ram_usage); y += 25;
-    draw_rate_row(hdc, width, y, "NET IN", state.net_in_bps, state.net_in_peak); y += 25;
-    draw_rate_row(hdc, width, y, "NET OUT", state.net_out_bps, state.net_out_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK R", state.disk_read_bps, state.disk_read_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK W", state.disk_write_bps, state.disk_write_peak); y += 25;
+    // Keep traffic compact and readable: direct values, not bars. sysinfo's
+    // received bytes are inbound; transmitted bytes are outbound.
+    draw_value_row(hdc, width, y, "NETWORK", &format!("↓ {}   ↑ {}", format_rate(state.net_in_bps), format_rate(state.net_out_bps))); y += 25;
+    draw_value_row(hdc, width, y, "DISK", &format!("↓ {}   ↑ {}", format_rate(state.disk_read_bps), format_rate(state.disk_write_bps))); y += 25;
     if state.show_disk_space { draw_metric_row(hdc, width, y, &state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += 25; }
     if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; draw_metric_row(hdc, width, y, "GPU", v, p, state.gpu_usage.unwrap_or(0.0)); }
 }
@@ -566,47 +495,9 @@ fn adaptive_peak(current: f64, rate: u64) -> f64 {
     if observed > current { current * 0.35 + observed * 0.65 } else { (current * 0.92 + observed * 0.08).max(floor) }
 }
 
-unsafe fn draw_rate_row(hdc: HDC, width: i32, y: i32, label: &str, rate: u64, peak: f64) {
-    let left = 12; let label_width = 78; let value_width = 88; let bar_x = left + label_width;
-    let bar_width = (width - bar_x - value_width - 14).max(24);
-    draw_label(hdc, left, y + 1, label, TEXT);
-    let pct = if rate == 0 { 0.0 } else { ((rate as f64 / peak.max(1024.0) * 100.0) as f32).max(100.0 / bar_width as f32) };
-    draw_bar(hdc, bar_x, y + 3, bar_width, 12, pct, if rate > 0 { NORMAL_COLOR } else { TRACK });
-    draw_right_text(hdc, width - 10, y + 1, &format_rate(rate), TEXT);
-}
-
-unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppState) {
-    let metrics: Vec<(&str, f32)> = vec![("CPU", state.cpu_usage), ("RAM", state.ram_usage)];
-    let top = 32; let bottom = 150; let meter_height = (bottom - top).max(20); let meter_width = 58; let gap = 42;
-    let total_width = meter_width * 2 + gap; let start_x = ((width - total_width) / 2).max(8);
-    for (i, (label, value)) in metrics.iter().enumerate() {
-        let x = start_x + i as i32 * (meter_width + gap); let color = usage_color(*value);
-        draw_centered_text(hdc, x + meter_width / 2, 10, label, TEXT);
-        draw_vertical_bar(hdc, x, top, meter_width, meter_height, *value, color);
-        draw_centered_text(hdc, x + meter_width / 2, bottom + 5, &format!("{value:.0}%"), color);
-    }
-    // Compute row spacing from the client height so every row stays inside the work area,
-    // including on small displays and after per-monitor DPI changes.
-    let mut rows: Vec<(&str, String, Option<f32>, f64)> = vec![
-        ("NET IN", format_rate(state.net_in_bps), None, state.net_in_peak),
-        ("NET OUT", format_rate(state.net_out_bps), None, state.net_out_peak),
-        ("DISK R", format_rate(state.disk_read_bps), None, state.disk_read_peak),
-        ("DISK W", format_rate(state.disk_write_bps), None, state.disk_write_peak),
-    ];
-    if state.show_disk_space { rows.push((&state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), 0.0)); }
-    if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; rows.push(("GPU", v, p, 0.0)); }
-    let start_y = bottom + 31;
-    let row_step = 22;
-    for (i, (label, value, utilization, peak)) in rows.iter().enumerate() {
-        let y = start_y + i as i32 * row_step;
-        if y + 15 > height { break; }
-        if *utilization == None {
-            let rate = match *label { "NET IN" => state.net_in_bps, "NET OUT" => state.net_out_bps, "DISK R" => state.disk_read_bps, _ => state.disk_write_bps };
-            draw_rate_row(hdc, width, y, label, rate, *peak);
-        } else {
-            draw_metric_row(hdc, width, y, label, value.clone(), *utilization, utilization.unwrap_or(0.0));
-        }
-    }
+unsafe fn draw_value_row(hdc: HDC, width: i32, y: i32, label: &str, value: &str) {
+    draw_label(hdc, 12, y + 1, label, TEXT);
+    draw_right_text(hdc, width - 10, y + 1, value, TEXT);
 }
 
 unsafe fn draw_metric_row(hdc: HDC, width: i32, y: i32, label: &str, value: String, utilization: Option<f32>, _unused: f32) {
@@ -650,20 +541,6 @@ unsafe fn draw_bar(hdc: HDC, x: i32, y: i32, width: i32, height: i32, value: f32
     }
 }
 
-unsafe fn draw_vertical_bar(hdc: HDC, x: i32, y: i32, width: i32, height: i32, value: f32, color: u32) {
-    let track = CreateSolidBrush(TRACK);
-    let track_rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
-    FillRect(hdc, &track_rect, track);
-    DeleteObject(track);
-
-    let fill_height = ((height as f32 * value.clamp(0.0, 100.0) / 100.0).round() as i32).clamp(0, height);
-    if fill_height > 0 {
-        let fill = CreateSolidBrush(color);
-        let fill_rect = RECT { left: x, top: y + height - fill_height, right: x + width, bottom: y + height };
-        FillRect(hdc, &fill_rect, fill);
-        DeleteObject(fill);
-    }
-}
 
 unsafe fn draw_label(hdc: HDC, x: i32, y: i32, text: &str, color: u32) {
     SetBkMode(hdc, TRANSPARENT as i32);
@@ -692,7 +569,6 @@ fn preferences_path() -> PathBuf {
 fn load_preferences(state: &mut AppState) {
     if let Ok(text) = fs::read_to_string(preferences_path()) {
         for line in text.lines() { let mut p = line.splitn(2, '='); let k = p.next().unwrap_or(""); let v = p.next().unwrap_or(""); match k {
-            "mode" => state.mode = if v == "vertical" { UiMode::VerticalMeters } else { UiMode::Horizontal },
             "opacity" => if let Ok(n) = v.parse::<u8>() { state.opacity = n.clamp(20, 100); },
             "show_gpu" => state.show_gpu = v == "true", "show_disk_space" => state.show_disk_space = v == "true", _ => {}
         }}
@@ -700,13 +576,14 @@ fn load_preferences(state: &mut AppState) {
 }
 fn save_preferences(state: &AppState) {
     let path = preferences_path(); if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-    let mode = if state.mode == UiMode::VerticalMeters { "vertical" } else { "horizontal" };
-    let content = format!("mode={mode}\nopacity={}\nshow_gpu={}\nshow_disk_space={}\n", state.opacity, state.show_gpu, state.show_disk_space);
+    let content = format!("mode=horizontal\nopacity={}\nshow_gpu={}\nshow_disk_space={}\n", state.opacity, state.show_gpu, state.show_disk_space);
     let _ = fs::write(path, content);
 }
-unsafe fn apply_window_opacity(hwnd: HWND, _opacity: u8) {
-    // The selected alpha is applied to background pixels by the per-pixel layered-window renderer.
-    let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+unsafe fn apply_window_opacity(hwnd: HWND, opacity: u8) {
+    // SetLayeredWindowAttributes is the reliable Win32 path for live opacity changes.
+    // It applies to the whole widget (background and foreground), unlike per-pixel alpha.
+    let alpha = ((opacity.clamp(20, 100) as u32 * 255) / 100) as u8;
+    let _ = SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
 }
 
 #[cfg(test)]
