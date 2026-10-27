@@ -18,7 +18,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const TIMER_ID: usize = 1;
 const REFRESH_MS: u32 = 1000;
-const ID_MODE_HORIZONTAL: u16 = 1001;
 const ID_OPACITY_20: u16 = 1020;
 const ID_OPACITY_40: u16 = 1021;
 const ID_OPACITY_60: u16 = 1022;
@@ -56,13 +55,26 @@ const fn rgb(r: u32, g: u32, b: u32) -> u32 {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiMode { Horizontal }
 
+const ROW_TOP: i32 = 8;
+const ROW_STEP: i32 = 24;
+const ROW_CONTENT_HEIGHT: i32 = 18;
+const BOTTOM_PADDING: i32 = 7;
+const WIDGET_WIDTH: i32 = 420;
+
 impl UiMode {
     fn size(self, state: &AppState) -> (i32, i32) {
-        // Four fixed rows (CPU, RAM, Network, Disk I/O), plus enabled optional rows.
-        // The renderer starts at y=10 and advances by 25px per row.
-        let rows = 4 + usize::from(state.show_disk_space) + usize::from(state.show_gpu);
-        (420, 10 + rows as i32 * 25)
+        // Four permanent rows (CPU, RAM, Network, Disk I/O). Optional rows
+        // consume space only while enabled. Match render_horizontal's row grid
+        // exactly instead of reserving room for hidden metrics.
+        let rows = visible_row_count(state) as i32;
+        let height = ROW_TOP + (rows - 1).max(0) * ROW_STEP
+            + ROW_CONTENT_HEIGHT + BOTTOM_PADDING;
+        (WIDGET_WIDTH, height)
     }
+}
+
+fn visible_row_count(state: &AppState) -> usize {
+    4 + usize::from(state.show_disk_space) + usize::from(state.show_gpu)
 }
 
 #[derive(Default)]
@@ -252,7 +264,6 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_COMMAND => {
             match (wparam & 0xffff) as u16 {
-                ID_MODE_HORIZONTAL => set_mode(hwnd, UiMode::Horizontal),
                 ID_OPACITY_20 => set_opacity(hwnd, 20),
                 ID_OPACITY_40 => set_opacity(hwnd, 40),
                 ID_OPACITY_60 => set_opacity(hwnd, 60),
@@ -323,9 +334,6 @@ unsafe fn show_context_menu(hwnd: HWND) {
     }
 
     let state = state_ptr(hwnd);
-    let current = if state.is_null() { None } else { Some((*state).mode) };
-    append_menu_item(menu, ID_MODE_HORIZONTAL, "Horizontal bars", true);
-    AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     let (show_gpu, show_space) = if state.is_null() { (false, false) } else { ((*state).show_gpu, (*state).show_disk_space) };
     append_menu_item(menu, ID_TOGGLE_GPU, "Show GPU (N/A if unavailable)", show_gpu);
     append_menu_item(menu, ID_TOGGLE_DISK_SPACE, "Show disk space", show_space);
@@ -338,7 +346,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
         append_menu_item(opacity_menu, ID_OPACITY_60, "60%", op == 60);
         append_menu_item(opacity_menu, ID_OPACITY_80, "80%", op == 80 || op == 75);
         append_menu_item(opacity_menu, ID_OPACITY_100, "100% - opaque", op == 100);
-        AppendMenuW(menu, MF_POPUP, opacity_menu as usize, windows_sys::w!("Background opacity"));
+        AppendMenuW(menu, MF_POPUP, opacity_menu as usize, windows_sys::w!("Widget opacity"));
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     AppendMenuW(menu, MF_STRING, ID_EXIT as usize, windows_sys::w!("Exit WinPulse"));
@@ -369,16 +377,6 @@ unsafe fn toggle_option(hwnd: HWND, gpu: bool) {
     else { (*state).show_disk_space = !(*state).show_disk_space; }
     resize_to_content(hwnd, &*state);
     save_preferences(&*state);
-    InvalidateRect(hwnd, ptr::null(), 1);
-}
-
-unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
-    let state = state_ptr(hwnd);
-    if !state.is_null() {
-        (*state).mode = mode;
-    }
-    if !state.is_null() { resize_to_content(hwnd, &*state); }
-    if !state.is_null() { save_preferences(&*state); }
     InvalidateRect(hwnd, ptr::null(), 1);
 }
 
@@ -477,14 +475,14 @@ unsafe fn paint(hwnd: HWND) {
 }
 
 unsafe fn render_horizontal(hdc: HDC, width: i32, _height: i32, state: &AppState) {
-    let mut y = 10;
-    draw_metric_row(hdc, width, y, "CPU", format!("{:.0}%", state.cpu_usage), Some(state.cpu_usage), state.cpu_usage); y += 25;
-    draw_metric_row(hdc, width, y, "RAM", format!("{:.0}%", state.ram_usage), Some(state.ram_usage), state.ram_usage); y += 25;
+    let mut y = ROW_TOP;
+    draw_metric_row(hdc, width, y, "CPU", format!("{:.0}%", state.cpu_usage), Some(state.cpu_usage), state.cpu_usage); y += ROW_STEP;
+    draw_metric_row(hdc, width, y, "RAM", format!("{:.0}%", state.ram_usage), Some(state.ram_usage), state.ram_usage); y += ROW_STEP;
     // Keep traffic compact and readable: direct values, not bars. sysinfo's
     // received bytes are inbound; transmitted bytes are outbound.
-    draw_value_row(hdc, width, y, "NETWORK", &format!("↓ {}   ↑ {}", format_rate(state.net_in_bps), format_rate(state.net_out_bps))); y += 25;
-    draw_value_row(hdc, width, y, "DISK", &format!("↓ {}   ↑ {}", format_rate(state.disk_read_bps), format_rate(state.disk_write_bps))); y += 25;
-    if state.show_disk_space { draw_metric_row(hdc, width, y, &state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += 25; }
+    draw_value_row(hdc, width, y, "NETWORK", &format!("↓ {}   ↑ {}", format_rate(state.net_in_bps), format_rate(state.net_out_bps))); y += ROW_STEP;
+    draw_value_row(hdc, width, y, "DISK", &format!("↓ {}   ↑ {}", format_rate(state.disk_read_bps), format_rate(state.disk_write_bps))); y += ROW_STEP;
+    if state.show_disk_space { draw_metric_row(hdc, width, y, &state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += ROW_STEP; }
     if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; draw_metric_row(hdc, width, y, "GPU", v, p, state.gpu_usage.unwrap_or(0.0)); }
 }
 
@@ -580,15 +578,23 @@ fn save_preferences(state: &AppState) {
     let _ = fs::write(path, content);
 }
 unsafe fn apply_window_opacity(hwnd: HWND, opacity: u8) {
-    // SetLayeredWindowAttributes is the reliable Win32 path for live opacity changes.
-    // It applies to the whole widget (background and foreground), unlike per-pixel alpha.
-    let alpha = ((opacity.clamp(20, 100) as u32 * 255) / 100) as u8;
-    let _ = SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+    // Reassert WS_EX_LAYERED before applying alpha. This also makes the operation
+    // resilient if another window-style change clears the layered bit. LWA_ALPHA
+    // deliberately affects the whole widget (background and foreground) so the
+    // selected opacity is visible consistently with the native GDI renderer.
+    let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    if ex_style & WS_EX_LAYERED == 0 {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex_style | WS_EX_LAYERED) as isize);
+    }
+    let alpha = ((u16::from(opacity.clamp(20, 100)) * 255) / 100) as u8;
+    if SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA) != 0 {
+        let _ = RedrawWindow(hwnd, ptr::null(), ptr::null_mut(), RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{adaptive_peak, format_rate};
+    use super::{adaptive_peak, format_rate, visible_row_count, AppState, UiMode};
     #[test] fn rates_use_human_units() {
         assert_eq!(format_rate(0), "0 B/s");
         assert_eq!(format_rate(1024), "1 KB/s");
@@ -598,5 +604,17 @@ mod tests {
         let p = adaptive_peak(1024.0, 1024 * 1024);
         assert!(p > 1024.0);
         assert!(adaptive_peak(p, 0) > 1024.0);
+    }
+    #[test] fn hidden_optional_rows_do_not_reserve_window_height() {
+        let mut state = AppState::default();
+        assert!(!state.show_gpu && !state.show_disk_space);
+        assert_eq!(visible_row_count(&state), 4);
+        let base = UiMode::Horizontal.size(&state).1;
+        state.show_gpu = true;
+        assert_eq!(visible_row_count(&state), 5);
+        assert_eq!(UiMode::Horizontal.size(&state).1, base + 24);
+        state.show_disk_space = true;
+        assert_eq!(visible_row_count(&state), 6);
+        assert_eq!(UiMode::Horizontal.size(&state).1, base + 48);
     }
 }

@@ -7,12 +7,12 @@ WinPulse is a lightweight native Windows floating system-resource widget written
 - **One compact layout:** `Horizontal bars`.
 - CPU and physical RAM utilization, refreshed about once per second.
 - A single **NETWORK** row shows received (↓) and sent (↑) throughput as direct values with units (`B/s`, `KB/s`, `MB/s`), without bars.
-- Independent **DISK READ** and **DISK WRITE** rows show direct throughput values (`B/s`, `KB/s`, `MB/s`), without bars.
+- A single **DISK** row shows read (↓) and write (↑) throughput as direct values (`B/s`, `KB/s`, `MB/s`), without bars.
 - Optional aggregate disk-space usage (off by default); its label includes the first detected volume mount point (for example, `SPACE C:`).
 - Optional GPU row (off by default); displays `N/A` when no validated provider is available rather than inventing a value.
-- Working live opacity control: right-click **Background opacity** and choose 20%, 40%, 60%, 80%, or 100%. Win32 layered-window alpha currently applies to the entire widget, including text and bars.
-- Right-click controls for layout, GPU visibility, disk-space visibility, background opacity, and exit.
-- Window repositioning is clamped to the nearest monitor's work area, excluding the taskbar. Display/DPI changes and layout switches trigger a bounds check.
+- Working live opacity control: right-click **Widget opacity** and choose 20%, 40%, 60%, 80%, or 100%. Win32 layered-window alpha currently applies to the entire widget, including text and bars.
+- Right-click controls for GPU visibility, disk-space visibility, opacity, and exit. Horizontal bars is the only layout; there is no unused layout selector.
+- Window repositioning is clamped to the nearest monitor's work area, excluding the taskbar. Display/DPI changes and option visibility changes trigger a bounds check and content-sized resize.
 - Layout, opacity, and visibility preferences are saved to `%APPDATA%\WinPulse\preferences.ini`.
 - Size-focused release profile (LTO, one codegen unit, stripping, and `opt-level = "z"`).
 
@@ -23,10 +23,8 @@ WinPulse is a lightweight native Windows floating system-resource widget written
 ```text
 CPU       [████████░░░░░░░░░░]              42%
 RAM       [████████████░░░░░░]              68%
-NET IN    [████░░░░░░░░░░░░░░]          2 MB/s
-NET OUT   [█░░░░░░░░░░░░░░░░░]        320 KB/s
-DISK R    [██░░░░░░░░░░░░░░░░]         12 MB/s
-DISK W    [█░░░░░░░░░░░░░░░░░]          4 MB/s
+NETWORK                         ↓ 2 MB/s   ↑ 320 KB/s
+DISK                            ↓ 12 MB/s   ↑ 4 MB/s
 ```
 
 ## Interaction
@@ -36,7 +34,7 @@ DISK W    [█░░░░░░░░░░░░░░░░░]          4 MB
 - **Horizontal bars:** the only supported layout.
 - **Show GPU:** toggle the GPU row. It reports `N/A` while no validated provider is available.
 - **Show disk space:** toggle aggregate used-space percentage across detected disks; the row label identifies the first detected volume mount point.
-- **Background opacity:** set widget opacity from 20% to 100%. Windows applies alpha to the entire layered window; at lower settings, text and bars also become more transparent.
+- **Opacity:** set widget opacity from 20% to 100%. Windows applies alpha to the entire layered window; at lower settings, text and bars also become more transparent.
 - **Exit WinPulse:** close the application.
 
 Preferences are saved under the current user's roaming application-data directory. The widget initially opens near the bottom-right of the primary monitor's work area; after moving to another monitor, bounds corrections use that monitor's work area.
