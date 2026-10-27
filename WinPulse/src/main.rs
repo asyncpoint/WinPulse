@@ -62,10 +62,24 @@ enum UiMode {
 }
 
 impl UiMode {
-    fn size(self) -> (i32, i32) {
-        match self {
-            Self::Horizontal => (420, 220),
-            Self::VerticalMeters => (360, 330),
+    fn width(self) -> i32 {
+        match self { Self::Horizontal => 420, Self::VerticalMeters => 360 }
+    }
+}
+
+impl AppState {
+    // Size to the actual visible content, rather than reserving space for hidden options.
+    fn desired_size(&self) -> (i32, i32) {
+        let optional_rows = usize::from(self.show_gpu) + usize::from(self.show_disk_space);
+        match self.mode {
+            UiMode::Horizontal => {
+                let rows = 6 + optional_rows; // CPU, RAM, network in/out, disk read/write
+                (self.mode.width(), 20 + rows as i32 * 25)
+            }
+            UiMode::VerticalMeters => {
+                let rows = 4 + optional_rows; // network in/out and disk read/write, plus options
+                (self.mode.width(), 189 + rows as i32 * 18)
+            }
         }
     }
 }
@@ -89,6 +103,7 @@ struct AppState {
     disk_used_percent: f32,
     disk_used_bytes: u64,
     disk_total_bytes: u64,
+    disk_label: String,
     gpu_usage: Option<f32>,
     show_gpu: bool,
     show_disk_space: bool,
@@ -117,6 +132,7 @@ impl Default for AppState {
             disk_used_percent: 0.0,
             disk_used_bytes: 0,
             disk_total_bytes: 0,
+            disk_label: "DISK".to_string(),
             gpu_usage: None,
             show_gpu: true,
             show_disk_space: false,
@@ -161,7 +177,7 @@ fn main() {
         let mut state = Box::new(AppState::default());
         load_preferences(&mut state);
         let state_ptr = (&mut *state) as *mut AppState;
-        let (width, height) = state.mode.size();
+        let (width, height) = state.desired_size();
         let (x, y) = initial_position(width, height);
 
         let hwnd = CreateWindowExW(
@@ -370,11 +386,18 @@ unsafe fn toggle_option(hwnd: HWND, gpu: bool) {
     if state.is_null() { return; }
     if gpu { (*state).show_gpu = !(*state).show_gpu; }
     else { (*state).show_disk_space = !(*state).show_disk_space; }
-    let (width, height) = (*state).mode.size();
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE);
-    keep_in_work_area(hwnd);
+    resize_to_content(hwnd, &*state);
     save_preferences(&*state);
     InvalidateRect(hwnd, ptr::null(), 1);
+}
+
+unsafe fn resize_to_content(hwnd: HWND, state: &AppState) {
+    let (width, height) = state.desired_size();
+    // Keep the widget's current top-left where possible, then clamp it to the current
+    // monitor work area so shrinking/growing never leaves it partly off-screen.
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, width, height,
+        SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    keep_in_work_area(hwnd);
 }
 
 unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
@@ -382,9 +405,7 @@ unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
     if !state.is_null() {
         (*state).mode = mode;
     }
-    let (width, height) = mode.size();
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE);
-    keep_in_work_area(hwnd);
+    if !state.is_null() { resize_to_content(hwnd, &*state); }
     if !state.is_null() { save_preferences(&*state); }
     InvalidateRect(hwnd, ptr::null(), 1);
 }
@@ -415,6 +436,7 @@ unsafe fn update_metrics(state: &mut AppState) {
     state.disk_read_peak = adaptive_peak(state.disk_read_peak, state.disk_read_bps);
     state.disk_write_peak = adaptive_peak(state.disk_write_peak, state.disk_write_bps);
     state.disk_total_bytes = disk_metrics.total_bytes;
+    state.disk_label = state.disks.list().first().map(|d| { let m = d.mount_point().to_string_lossy(); let label = m.trim_end_matches('\\').trim_end_matches('/'); if label.is_empty() { "DISK".to_string() } else { format!("SPACE {}", label) } }).unwrap_or_else(|| "SPACE".to_string());
     state.disk_used_bytes = disk_metrics.used_bytes;
     state.disk_used_percent = disk_metrics.used_percent;
     state.gpu_usage = gpu::sample();
@@ -518,7 +540,7 @@ unsafe fn paint(hwnd: HWND) {
             let bg = BG;
             for i in 0..count {
                 let c = *px.add(i); let b = c & 0xff; let g = (c >> 8) & 0xff; let r = (c >> 16) & 0xff;
-                if r == ((bg >> 16) & 0xff) && g == ((bg >> 8) & 0xff) && b == (bg & 0xff) {
+                if r == (bg & 0xff) && g == ((bg >> 8) & 0xff) && b == ((bg >> 16) & 0xff) {
                     *px.add(i) = ((alpha << 24) | (((r * alpha / 255) & 0xff) << 16) | (((g * alpha / 255) & 0xff) << 8) | ((b * alpha / 255) & 0xff));
                 } else { *px.add(i) = 0xff000000 | (c & 0x00ffffff); }
             }
@@ -542,9 +564,9 @@ unsafe fn render_horizontal(hdc: HDC, width: i32, _height: i32, state: &AppState
     draw_metric_row(hdc, width, y, "RAM", format!("{:.0}%", state.ram_usage), Some(state.ram_usage), state.ram_usage); y += 25;
     draw_rate_row(hdc, width, y, "NET IN", state.net_in_bps, state.net_in_peak); y += 25;
     draw_rate_row(hdc, width, y, "NET OUT", state.net_out_bps, state.net_out_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK READ", state.disk_read_bps, state.disk_read_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK WRITE", state.disk_write_bps, state.disk_write_peak); y += 25;
-    if state.show_disk_space { draw_metric_row(hdc, width, y, "SPACE", format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += 25; }
+    draw_rate_row(hdc, width, y, "DISK R", state.disk_read_bps, state.disk_read_peak); y += 25;
+    draw_rate_row(hdc, width, y, "DISK W", state.disk_write_bps, state.disk_write_peak); y += 25;
+    if state.show_disk_space { draw_metric_row(hdc, width, y, &state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += 25; }
     if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; draw_metric_row(hdc, width, y, "GPU", v, p, state.gpu_usage.unwrap_or(0.0)); }
 }
 
@@ -574,14 +596,29 @@ unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppS
         draw_vertical_bar(hdc, x, top, meter_width, meter_height, *value, color);
         draw_centered_text(hdc, x + meter_width / 2, bottom + 5, &format!("{value:.0}%"), color);
     }
-    let mut y = 180;
-    draw_rate_row(hdc, width, y, "NET IN", state.net_in_bps, state.net_in_peak); y += 25;
-    draw_rate_row(hdc, width, y, "NET OUT", state.net_out_bps, state.net_out_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK READ", state.disk_read_bps, state.disk_read_peak); y += 25;
-    draw_rate_row(hdc, width, y, "DISK WRITE", state.disk_write_bps, state.disk_write_peak); y += 25;
-    if state.show_disk_space { draw_metric_row(hdc, width, y, "SPACE", format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += 25; }
-    if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; draw_metric_row(hdc, width, y, "GPU", v, p, state.gpu_usage.unwrap_or(0.0)); }
-    let _ = height;
+    // Compute row spacing from the client height so every row stays inside the work area,
+    // including on small displays and after per-monitor DPI changes.
+    let mut rows: Vec<(&str, String, Option<f32>, f64)> = vec![
+        ("NET IN", format_rate(state.net_in_bps), None, state.net_in_peak),
+        ("NET OUT", format_rate(state.net_out_bps), None, state.net_out_peak),
+        ("DISK R", format_rate(state.disk_read_bps), None, state.disk_read_peak),
+        ("DISK W", format_rate(state.disk_write_bps), None, state.disk_write_peak),
+    ];
+    if state.show_disk_space { rows.push((&state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), 0.0)); }
+    if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; rows.push(("GPU", v, p, 0.0)); }
+    let start_y = (bottom + 31).min(height.saturating_sub((rows.len() as i32) * 18 + 4));
+    let available = (height - start_y - 4).max(1);
+    let row_step = (available / rows.len().max(1) as i32).clamp(16, 25);
+    for (i, (label, value, utilization, peak)) in rows.iter().enumerate() {
+        let y = start_y + i as i32 * row_step;
+        if y + 15 > height { break; }
+        if *utilization == None {
+            let rate = match *label { "NET IN" => state.net_in_bps, "NET OUT" => state.net_out_bps, "DISK R" => state.disk_read_bps, _ => state.disk_write_bps };
+            draw_rate_row(hdc, width, y, label, rate, *peak);
+        } else {
+            draw_metric_row(hdc, width, y, label, value.clone(), *utilization, utilization.unwrap_or(0.0));
+        }
+    }
 }
 
 unsafe fn draw_metric_row(hdc: HDC, width: i32, y: i32, label: &str, value: String, utilization: Option<f32>, _unused: f32) {

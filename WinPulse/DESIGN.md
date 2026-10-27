@@ -16,7 +16,7 @@ The initial location is near the bottom-right of the primary monitor's work area
 
 ## Background opacity
 
-The widget uses a layered window with a 32-bit alpha surface. Pixels matching the panel background receive the selected alpha (20–100%); foreground pixels remain opaque. This avoids fading the labels and bars along with the panel. GDI text edge pixels can be color-blended with the panel background, so very low opacity may subtly affect antialiased edges.
+The widget uses a layered window with a 32-bit alpha surface. Pixels matching the panel background receive the selected alpha (20–100%); foreground pixels remain opaque. COLORREF and DIB pixel channel orders are handled explicitly when matching the background color. This avoids fading the labels and bars along with the panel. GDI text edge pixels can be color-blended with the panel background, so very low opacity may subtly affect antialiased edges.
 
 ## Preferences
 
@@ -27,3 +27,8 @@ The selected layout, opacity, GPU visibility, and disk-space visibility are pers
 - GPU utilization is deliberately `N/A` until a validated provider is available.
 - Disk-space totals are aggregated, not selectable per drive.
 - Native rendering and mixed-DPI placement require runtime validation on Windows; the current development environment did not provide the Rust toolchain needed to compile or execute this revision.
+
+
+## Content-sized window
+
+Window height is derived from the active layout and the number of enabled optional rows. Toggling GPU or disk-space display resizes the window immediately and re-clamps it to the active monitor work area. Horizontal mode uses a compact row-based height; Vertical Bars calculates its height from the meter region and the visible rows.
