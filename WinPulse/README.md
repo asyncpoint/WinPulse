@@ -13,7 +13,6 @@ WinPulse is a lightweight native Windows floating system-resource widget written
 - Background-only transparency: right-click **Background opacity** and choose 20%, 40%, 60%, 80%, or 100%. Text and bars remain opaque for readability.
 - Right-click controls for layout, GPU visibility, disk-space visibility, background opacity, and exit.
 - Window repositioning is clamped to the nearest monitor's work area, excluding the taskbar. Display/DPI changes and layout switches trigger a bounds check.
-- The window automatically shrinks or grows to fit the currently visible rows when GPU or disk-space display is toggled; hidden rows do not reserve blank space.
 - Layout, opacity, and visibility preferences are saved to `%APPDATA%\WinPulse\preferences.ini`.
 - Size-focused release profile (LTO, one codegen unit, stripping, and `opt-level = "z"`).
 
@@ -41,7 +40,7 @@ CPU and RAM are shown as vertical meters, with network and disk throughput in se
 - **Horizontal bars / Vertical Bars:** change layout.
 - **Show GPU:** toggle the GPU row. It reports `N/A` while no validated provider is available.
 - **Show disk space:** toggle aggregate used-space percentage across detected disks; the row label identifies the first detected volume mount point.
-- **Background opacity:** set background opacity from 20% to 100%. Only exact background pixels are made translucent; foreground text and bars are rendered opaque. The renderer compares GDI COLORREF channels against the DIB pixel channel order before assigning alpha, so opacity selections visibly change the panel background.
+- **Background opacity:** set background opacity from 20% to 100%. Only exact background pixels are made translucent; foreground text and bars are rendered opaque. This uses a layered-window alpha surface rather than whole-window alpha.
 - **Exit WinPulse:** close the application.
 
 Preferences are saved under the current user's roaming application-data directory. The widget initially opens near the bottom-right of the primary monitor's work area; after moving to another monitor, bounds corrections use that monitor's work area.

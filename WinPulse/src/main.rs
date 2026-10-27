@@ -62,26 +62,22 @@ enum UiMode {
 }
 
 impl UiMode {
-    fn width(self) -> i32 {
-        match self { Self::Horizontal => 420, Self::VerticalMeters => 360 }
-    }
-}
-
-impl AppState {
-    // Size to the actual visible content, rather than reserving space for hidden options.
-    fn desired_size(&self) -> (i32, i32) {
-        let optional_rows = usize::from(self.show_gpu) + usize::from(self.show_disk_space);
-        match self.mode {
-            UiMode::Horizontal => {
-                let rows = 6 + optional_rows; // CPU, RAM, network in/out, disk read/write
-                (self.mode.width(), 20 + rows as i32 * 25)
-            }
-            UiMode::VerticalMeters => {
-                let rows = 4 + optional_rows; // network in/out and disk read/write, plus options
-                (self.mode.width(), 189 + rows as i32 * 18)
+    fn size(self, state: &AppState) -> (i32, i32) {
+        // Size to the active controls only; no reserved space for hidden metrics.
+        match self {
+            Self::Horizontal => (420, 20 + visible_row_count(state) as i32 * 25),
+            Self::VerticalMeters => {
+                let rows = visible_row_count(state) as i32;
+                (360, 190 + rows * 22)
             }
         }
     }
+}
+
+fn visible_row_count(state: &AppState) -> usize {
+    // CPU and RAM plus four throughput rows are always present.
+    6 + usize::from(state.show_disk_space) + usize::from(state.show_gpu)
+}
 }
 
 #[derive(Default)]
@@ -177,7 +173,7 @@ fn main() {
         let mut state = Box::new(AppState::default());
         load_preferences(&mut state);
         let state_ptr = (&mut *state) as *mut AppState;
-        let (width, height) = state.desired_size();
+        let (width, height) = state.mode.size(&state);
         let (x, y) = initial_position(width, height);
 
         let hwnd = CreateWindowExW(
@@ -259,6 +255,8 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            let state = state_ptr(hwnd);
+            if !state.is_null() { resize_to_content(hwnd, &*state); }
             keep_in_work_area(hwnd);
             InvalidateRect(hwnd, ptr::null(), 0);
             0
@@ -391,15 +389,6 @@ unsafe fn toggle_option(hwnd: HWND, gpu: bool) {
     InvalidateRect(hwnd, ptr::null(), 1);
 }
 
-unsafe fn resize_to_content(hwnd: HWND, state: &AppState) {
-    let (width, height) = state.desired_size();
-    // Keep the widget's current top-left where possible, then clamp it to the current
-    // monitor work area so shrinking/growing never leaves it partly off-screen.
-    let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, width, height,
-        SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-    keep_in_work_area(hwnd);
-}
-
 unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
     let state = state_ptr(hwnd);
     if !state.is_null() {
@@ -408,6 +397,20 @@ unsafe fn set_mode(hwnd: HWND, mode: UiMode) {
     if !state.is_null() { resize_to_content(hwnd, &*state); }
     if !state.is_null() { save_preferences(&*state); }
     InvalidateRect(hwnd, ptr::null(), 1);
+}
+
+unsafe fn resize_to_content(hwnd: HWND, state: &AppState) {
+    let (width, height) = state.mode.size(state);
+    let work = work_area_for(hwnd);
+    let work_w = (work.right - work.left).max(1);
+    let work_h = (work.bottom - work.top).max(1);
+    let width = width.min(work_w);
+    let height = height.min(work_h);
+    let mut r: RECT = zeroed();
+    let _ = GetWindowRect(hwnd, &mut r);
+    let x = r.left.clamp(work.left, (work.right - width).max(work.left));
+    let y = r.top.clamp(work.top, (work.bottom - height).max(work.top));
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 
 unsafe fn set_opacity(hwnd: HWND, opacity: u8) {
@@ -472,89 +475,75 @@ unsafe fn update_metrics(state: &mut AppState) {
 
 unsafe fn paint(hwnd: HWND) {
     let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
-    if hdc.is_null() {
-        EndPaint(hwnd, &ps);
-        return;
-    }
+    let paint_dc = BeginPaint(hwnd, &mut ps);
+    if paint_dc.is_null() { EndPaint(hwnd, &ps); return; }
 
     let mut rect: RECT = zeroed();
     GetClientRect(hwnd, &mut rect);
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
-    if width <= 0 || height <= 0 {
-        EndPaint(hwnd, &ps);
-        return;
-    }
+    if width <= 0 || height <= 0 { EndPaint(hwnd, &ps); return; }
 
-    let mem_dc = CreateCompatibleDC(hdc);
-    if mem_dc.is_null() {
-        let fallback_brush = CreateSolidBrush(BG);
-        if !fallback_brush.is_null() {
-            FillRect(hdc, &rect, fallback_brush);
-            DeleteObject(fallback_brush);
-        }
-        EndPaint(hwnd, &ps);
-        return;
-    }
-    let bitmap = CreateCompatibleBitmap(hdc, width, height);
-    if bitmap.is_null() {
-        DeleteDC(mem_dc);
-        let fallback_brush = CreateSolidBrush(BG);
-        if !fallback_brush.is_null() {
-            FillRect(hdc, &rect, fallback_brush);
-            DeleteObject(fallback_brush);
-        }
-        EndPaint(hwnd, &ps);
-        return;
-    }
-    let old_bitmap = SelectObject(mem_dc, bitmap);
+    // Render directly into a 32-bit DIB. Compatible bitmaps/BitBlt do not reliably
+    // preserve the alpha channel required by UpdateLayeredWindow.
+    let mut bmi: BITMAPINFO = zeroed();
+    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    let mut bits: *mut core::ffi::c_void = ptr::null_mut();
+    let dib = CreateDIBSection(paint_dc, &bmi, DIB_RGB_COLORS, &mut bits, ptr::null_mut(), 0);
+    if dib.is_null() || bits.is_null() { EndPaint(hwnd, &ps); return; }
+    let dib_dc = CreateCompatibleDC(paint_dc);
+    if dib_dc.is_null() { DeleteObject(dib); EndPaint(hwnd, &ps); return; }
+    let old = SelectObject(dib_dc, dib);
+
     let bg_brush = CreateSolidBrush(BG);
-    FillRect(mem_dc, &rect, bg_brush);
+    FillRect(dib_dc, &rect, bg_brush);
     DeleteObject(bg_brush);
-
     let state = state_ptr(hwnd);
     if !state.is_null() {
         match (*state).mode {
-            UiMode::Horizontal => render_horizontal(mem_dc, width, height, &*state),
-            UiMode::VerticalMeters => render_vertical_meters(mem_dc, width, height, &*state),
+            UiMode::Horizontal => render_horizontal(dib_dc, width, height, &*state),
+            UiMode::VerticalMeters => render_vertical_meters(dib_dc, width, height, &*state),
         }
     }
 
-    // Convert the rendered frame to a 32-bit premultiplied-alpha DIB. Exact background
-    // pixels receive the selected alpha; foreground pixels stay opaque so text/bars remain crisp.
-    let mut bmi: BITMAPINFO = zeroed();
-    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = width; bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
-    let mut bits: *mut core::ffi::c_void = ptr::null_mut();
-    let dib = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, ptr::null_mut(), 0);
-    if !dib.is_null() && !bits.is_null() {
-        let dib_dc = CreateCompatibleDC(hdc);
-        if !dib_dc.is_null() {
-            let old_dib = SelectObject(dib_dc, dib);
-            BitBlt(dib_dc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
-            let px = bits as *mut u32; let count = (width * height) as usize;
-            let opacity = { let st = state_ptr(hwnd); if st.is_null() { 80u8 } else { (*st).opacity } };
-            let alpha = opacity as u32 * 255 / 100;
-            let bg = BG;
-            for i in 0..count {
-                let c = *px.add(i); let b = c & 0xff; let g = (c >> 8) & 0xff; let r = (c >> 16) & 0xff;
-                if r == (bg & 0xff) && g == ((bg >> 8) & 0xff) && b == ((bg >> 16) & 0xff) {
-                    *px.add(i) = ((alpha << 24) | (((r * alpha / 255) & 0xff) << 16) | (((g * alpha / 255) & 0xff) << 8) | ((b * alpha / 255) & 0xff));
-                } else { *px.add(i) = 0xff000000 | (c & 0x00ffffff); }
-            }
-            let mut dst = POINT { x: 0, y: 0 }; let mut src = POINT { x: 0, y: 0 };
-            let size = SIZE { cx: width, cy: height };
-            let mut blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-            let mut wndpt: POINT = zeroed(); GetWindowRect(hwnd, &mut rect); wndpt.x = rect.left; wndpt.y = rect.top;
-            UpdateLayeredWindow(hwnd, ptr::null_mut(), &mut wndpt, &size, dib_dc, &mut src, 0, &mut blend, ULW_ALPHA);
-            SelectObject(dib_dc, old_dib); DeleteDC(dib_dc); DeleteObject(dib);
-        } else { BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY); }
-    } else { BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY); }
-    SelectObject(mem_dc, old_bitmap);
-    DeleteObject(bitmap);
-    DeleteDC(mem_dc);
+    // DIB pixels are 0x00RRGGBB; COLORREF is 0x00BBGGRR. Match only the panel's
+    // exact background color, so text, tracks and usage bars remain fully opaque.
+    let bg_pixel = ((BG & 0xff) << 16) | (BG & 0xff00) | ((BG >> 16) & 0xff);
+    let opacity = if state.is_null() { 80u8 } else { (*state).opacity };
+    let alpha = (opacity as u32 * 255 / 100).clamp(1, 255);
+    let pixels = bits as *mut u32;
+    for i in 0..(width * height) as usize {
+        let pixel = *pixels.add(i) & 0x00ff_ffff;
+        if pixel == bg_pixel {
+            let r = (pixel >> 16) & 0xff;
+            let g = (pixel >> 8) & 0xff;
+            let b = pixel & 0xff;
+            *pixels.add(i) = (alpha << 24) | ((r * alpha / 255) << 16)
+                | ((g * alpha / 255) << 8) | (b * alpha / 255);
+        } else {
+            *pixels.add(i) = 0xff00_0000 | pixel;
+        }
+    }
+
+    let mut dst = POINT { x: 0, y: 0 };
+    let mut src = POINT { x: 0, y: 0 };
+    let size = SIZE { cx: width, cy: height };
+    let mut blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0,
+        SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+    let mut wnd_rect: RECT = zeroed();
+    GetWindowRect(hwnd, &mut wnd_rect);
+    dst.x = wnd_rect.left; dst.y = wnd_rect.top;
+    let _ = UpdateLayeredWindow(hwnd, ptr::null_mut(), &mut dst, &size, dib_dc,
+        &mut src, 0, &mut blend, ULW_ALPHA);
+
+    SelectObject(dib_dc, old);
+    DeleteDC(dib_dc);
+    DeleteObject(dib);
     EndPaint(hwnd, &ps);
 }
 
@@ -606,9 +595,8 @@ unsafe fn render_vertical_meters(hdc: HDC, width: i32, height: i32, state: &AppS
     ];
     if state.show_disk_space { rows.push((&state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), 0.0)); }
     if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; rows.push(("GPU", v, p, 0.0)); }
-    let start_y = (bottom + 31).min(height.saturating_sub((rows.len() as i32) * 18 + 4));
-    let available = (height - start_y - 4).max(1);
-    let row_step = (available / rows.len().max(1) as i32).clamp(16, 25);
+    let start_y = bottom + 31;
+    let row_step = 22;
     for (i, (label, value, utilization, peak)) in rows.iter().enumerate() {
         let y = start_y + i as i32 * row_step;
         if y + 15 > height { break; }
