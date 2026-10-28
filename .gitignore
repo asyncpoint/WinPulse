@@ -1,8 +1,3 @@
-/target/
-/dist/
+/target
+/dist
 *.pdb
-*.ilk
-*.obj
-*.exe
-.DS_Store
-Thumbs.db

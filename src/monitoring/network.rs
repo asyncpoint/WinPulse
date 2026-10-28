@@ -16,12 +16,10 @@ pub fn sample(networks: &mut Networks, previous: &mut Option<(u64, u64)>) -> Net
         received = received.saturating_add(data.total_received());
         transmitted = transmitted.saturating_add(data.total_transmitted());
     }
-    let rates = previous
-        .map(|(old_rx, old_tx)| NetworkRates {
-            received_bytes_per_sec: received.saturating_sub(old_rx),
-            transmitted_bytes_per_sec: transmitted.saturating_sub(old_tx),
-        })
-        .unwrap_or_default();
+    let rates = previous.map(|(old_rx, old_tx)| NetworkRates {
+        received_bytes_per_sec: received.saturating_sub(old_rx),
+        transmitted_bytes_per_sec: transmitted.saturating_sub(old_tx),
+    }).unwrap_or_default();
     *previous = Some((received, transmitted));
     rates
 }

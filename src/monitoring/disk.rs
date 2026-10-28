@@ -18,16 +18,14 @@ pub fn sample(disks: &mut Disks) -> DiskMetrics {
     for disk in disks.list() {
         let usage = disk.usage();
         result.read_bytes_per_sec = result.read_bytes_per_sec.saturating_add(usage.read_bytes);
-        result.written_bytes_per_sec = result
-            .written_bytes_per_sec
-            .saturating_add(usage.written_bytes);
+        result.written_bytes_per_sec = result.written_bytes_per_sec.saturating_add(usage.written_bytes);
         result.total_bytes = result.total_bytes.saturating_add(disk.total_space());
         available = available.saturating_add(disk.available_space());
     }
     result.used_bytes = result.total_bytes.saturating_sub(available);
     if result.total_bytes > 0 {
-        result.used_percent =
-            (result.used_bytes as f64 * 100.0 / result.total_bytes as f64).clamp(0.0, 100.0) as f32;
+        result.used_percent = (result.used_bytes as f64 * 100.0 / result.total_bytes as f64)
+            .clamp(0.0, 100.0) as f32;
     }
     result
 }
