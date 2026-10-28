@@ -5,15 +5,15 @@ WinPulse is a compact native Windows resource monitor written in Rust using Win3
 ## Features
 
 - CPU and physical RAM usage shown as horizontal bars. Usage colors are green below 70%, yellow from 70% to below 90%, and red at 90% or higher.
-- One text-only **NETWORK** row: `↓ received  ↑ sent` rates. Down arrow is inbound/received; up arrow is outbound/sent.
-- One text-only **DISK** row: `↓ read  ↑ write` rates. Down arrow is read; up arrow is write.
+- Optional text-only **NETWORK** row (enabled by default): `↓ received  ↑ sent` rates. Down arrow is inbound/received; up arrow is outbound/sent.
+- Optional text-only **DISK** row (enabled by default): `↓ read  ↑ write` rates. Down arrow is read; up arrow is write.
 - Throughput units are B/s, KB/s, or MB/s.
 - Optional GPU row is disabled by default; it reports `N/A` when no validated provider is available.
 - Optional disk-space row is disabled by default and labels the first detected mount point (for example `SPACE C:`). Space usage is aggregate across detected disks.
-- Right-click controls for optional rows, background opacity (20%, 40%, 60%, 80%, 100%), and exit.
+- Right-click controls to enable/disable network traffic and disk read/write rows, optional GPU/disk-space rows, background opacity (20%, 40%, 60%, 80%, 100%), and exit.
 - Background-only per-pixel transparency: panel background opacity changes while foreground text and bars remain opaque.
-- Window height is calculated from visible rows at startup and whenever optional rows are toggled. Window placement is clamped to the nearest monitor work area.
-- Preferences are stored in `%APPDATA%\WinPulse\preferences.ini`.
+- Window height is calculated from visible rows at startup and whenever network, disk I/O, GPU, or disk-space rows are toggled. Window placement is clamped to the nearest monitor work area.
+- Preferences (including network and disk I/O visibility) are stored in `%APPDATA%\WinPulse\preferences.ini`.
 
 ## Default view
 
@@ -28,6 +28,8 @@ DISK                            ↓ 640 KB/s   ↑ 80 KB/s
 
 - **Left-click and drag:** move the widget. It is clamped to the nearest monitor's work area when the drag ends.
 - **Right-click:** open the menu.
+- **Show network traffic:** toggle the NETWORK receive/transmit row.
+- **Show disk read/write:** toggle the DISK read/write row.
 - **Show GPU:** toggle the optional GPU row; unavailable metrics display `N/A`.
 - **Show disk space:** toggle the optional disk capacity row.
 - **Background opacity:** change panel opacity without deliberately fading foreground text and bars.

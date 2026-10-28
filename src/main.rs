@@ -25,6 +25,8 @@ const ID_OPACITY_80: u16 = 1023;
 const ID_OPACITY_100: u16 = 1024;
 const ID_TOGGLE_GPU: u16 = 1010;
 const ID_TOGGLE_DISK_SPACE: u16 = 1011;
+const ID_TOGGLE_NETWORK: u16 = 1012;
+const ID_TOGGLE_DISK_IO: u16 = 1013;
 const ID_EXIT: u16 = 1099;
 const CLASS_NAME: windows_sys::core::PCWSTR = windows_sys::w!("WinPulseNativeClass");
 
@@ -62,9 +64,8 @@ const WIDGET_WIDTH: i32 = 420;
 
 impl UiMode {
     fn size(self, state: &AppState) -> (i32, i32) {
-        // Four permanent rows (CPU, RAM, Network, Disk I/O). Optional rows
-        // consume space only while enabled. Match render_horizontal's row grid
-        // exactly instead of reserving room for hidden metrics.
+        // CPU and RAM are permanent. Network, disk I/O, GPU, and disk-space rows
+        // consume space only while enabled. Match render_horizontal row grid.
         let rows = visible_row_count(state) as i32;
         let height = ROW_TOP + (rows - 1).max(0) * ROW_STEP
             + ROW_CONTENT_HEIGHT + BOTTOM_PADDING;
@@ -73,7 +74,8 @@ impl UiMode {
 }
 
 fn visible_row_count(state: &AppState) -> usize {
-    4 + usize::from(state.show_disk_space) + usize::from(state.show_gpu)
+    2 + usize::from(state.show_network) + usize::from(state.show_disk_io)
+        + usize::from(state.show_disk_space) + usize::from(state.show_gpu)
 }
 
 #[derive(Default)]
@@ -99,6 +101,8 @@ struct AppState {
     gpu_usage: Option<f32>,
     show_gpu: bool,
     show_disk_space: bool,
+    show_network: bool,
+    show_disk_io: bool,
     cpu: CpuCounters,
     system: System,
     networks: Networks,
@@ -124,6 +128,8 @@ impl Default for AppState {
             gpu_usage: None,
             show_gpu: false,
             show_disk_space: false,
+            show_network: true,
+            show_disk_io: true,
             cpu: CpuCounters::default(),
             system: System::new(),
             networks: Networks::new_with_refreshed_list(),
@@ -262,8 +268,10 @@ unsafe extern "system" fn wnd_proc(
                 ID_OPACITY_60 => set_opacity(hwnd, 60),
                 ID_OPACITY_80 => set_opacity(hwnd, 80),
                 ID_OPACITY_100 => set_opacity(hwnd, 100),
-                ID_TOGGLE_GPU => toggle_option(hwnd, true),
-                ID_TOGGLE_DISK_SPACE => toggle_option(hwnd, false),
+                ID_TOGGLE_GPU => toggle_option(hwnd, "gpu"),
+                ID_TOGGLE_DISK_SPACE => toggle_option(hwnd, "space"),
+                ID_TOGGLE_NETWORK => toggle_option(hwnd, "network"),
+                ID_TOGGLE_DISK_IO => toggle_option(hwnd, "disk_io"),
                 ID_EXIT => {
                     DestroyWindow(hwnd);
                 }
@@ -327,7 +335,13 @@ unsafe fn show_context_menu(hwnd: HWND) {
     }
 
     let state = state_ptr(hwnd);
-    let (show_gpu, show_space) = if state.is_null() { (false, false) } else { ((*state).show_gpu, (*state).show_disk_space) };
+    let (show_gpu, show_space, show_network, show_disk_io) = if state.is_null() {
+        (false, false, true, true)
+    } else {
+        ((*state).show_gpu, (*state).show_disk_space, (*state).show_network, (*state).show_disk_io)
+    };
+    append_menu_item(menu, ID_TOGGLE_NETWORK, "Show network traffic", show_network);
+    append_menu_item(menu, ID_TOGGLE_DISK_IO, "Show disk read/write", show_disk_io);
     append_menu_item(menu, ID_TOGGLE_GPU, "Show GPU (N/A if unavailable)", show_gpu);
     append_menu_item(menu, ID_TOGGLE_DISK_SPACE, "Show disk space", show_space);
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -363,11 +377,16 @@ unsafe fn append_menu_item(menu: HMENU, id: u16, label: &'static str, checked: b
     AppendMenuW(menu, flags, id as usize, wide.as_ptr());
 }
 
-unsafe fn toggle_option(hwnd: HWND, gpu: bool) {
+unsafe fn toggle_option(hwnd: HWND, option: &str) {
     let state = state_ptr(hwnd);
     if state.is_null() { return; }
-    if gpu { (*state).show_gpu = !(*state).show_gpu; }
-    else { (*state).show_disk_space = !(*state).show_disk_space; }
+    match option {
+        "gpu" => (*state).show_gpu = !(*state).show_gpu,
+        "space" => (*state).show_disk_space = !(*state).show_disk_space,
+        "network" => (*state).show_network = !(*state).show_network,
+        "disk_io" => (*state).show_disk_io = !(*state).show_disk_io,
+        _ => return,
+    }
     resize_to_content(hwnd, &*state);
     save_preferences(&*state);
     InvalidateRect(hwnd, ptr::null(), 1);
@@ -567,8 +586,14 @@ unsafe fn render_horizontal(hdc: HDC, width: i32, _height: i32, state: &AppState
     draw_metric_row(hdc, width, y, "RAM", format!("{:.0}%", state.ram_usage), Some(state.ram_usage), state.ram_usage); y += ROW_STEP;
     // Keep traffic compact and readable: direct values, not bars. sysinfo's
     // received bytes are inbound; transmitted bytes are outbound.
-    draw_value_row(hdc, width, y, "NETWORK", &format!("↓ {}   ↑ {}", format_rate(state.net_in_bps), format_rate(state.net_out_bps))); y += ROW_STEP;
-    draw_value_row(hdc, width, y, "DISK", &format!("↓ {}   ↑ {}", format_rate(state.disk_read_bps), format_rate(state.disk_write_bps))); y += ROW_STEP;
+    if state.show_network {
+        draw_value_row(hdc, width, y, "NETWORK", &format!("↓ {}   ↑ {}", format_rate(state.net_in_bps), format_rate(state.net_out_bps)));
+        y += ROW_STEP;
+    }
+    if state.show_disk_io {
+        draw_value_row(hdc, width, y, "DISK", &format!("↓ {}   ↑ {}", format_rate(state.disk_read_bps), format_rate(state.disk_write_bps)));
+        y += ROW_STEP;
+    }
     if state.show_disk_space { draw_metric_row(hdc, width, y, &state.disk_label, format!("{:.0}% used", state.disk_used_percent), Some(state.disk_used_percent), state.disk_used_percent); y += ROW_STEP; }
     if state.show_gpu { let (v, p) = match state.gpu_usage { Some(v) => (format!("{v:.0}%"), Some(v)), None => ("N/A".to_string(), None) }; draw_metric_row(hdc, width, y, "GPU", v, p, state.gpu_usage.unwrap_or(0.0)); }
 }
@@ -641,13 +666,17 @@ fn load_preferences(state: &mut AppState) {
     if let Ok(text) = fs::read_to_string(preferences_path()) {
         for line in text.lines() { let mut p = line.splitn(2, '='); let k = p.next().unwrap_or(""); let v = p.next().unwrap_or(""); match k {
             "opacity" => if let Ok(n) = v.parse::<u8>() { state.opacity = n.clamp(20, 100); },
-            "show_gpu" => state.show_gpu = v == "true", "show_disk_space" => state.show_disk_space = v == "true", _ => {}
+            "show_gpu" => state.show_gpu = v == "true",
+            "show_disk_space" => state.show_disk_space = v == "true",
+            "show_network" => state.show_network = v == "true",
+            "show_disk_io" => state.show_disk_io = v == "true",
+            _ => {}
         }}
     }
 }
 fn save_preferences(state: &AppState) {
     let path = preferences_path(); if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-    let content = format!("opacity={}\nshow_gpu={}\nshow_disk_space={}\n", state.opacity, state.show_gpu, state.show_disk_space);
+    let content = format!("opacity={}\nshow_gpu={}\nshow_disk_space={}\nshow_network={}\nshow_disk_io={}\n", state.opacity, state.show_gpu, state.show_disk_space, state.show_network, state.show_disk_io);
     let _ = fs::write(path, content);
 }
 unsafe fn apply_window_opacity(hwnd: HWND, _opacity: u8) {
@@ -676,6 +705,7 @@ mod tests {
     #[test] fn hidden_optional_rows_do_not_reserve_window_height() {
         let mut state = AppState::default();
         assert!(!state.show_gpu && !state.show_disk_space);
+        assert!(state.show_network && state.show_disk_io);
         assert_eq!(visible_row_count(&state), 4);
         let base = UiMode::Horizontal.size(&state).1;
         state.show_gpu = true;
@@ -684,5 +714,16 @@ mod tests {
         state.show_disk_space = true;
         assert_eq!(visible_row_count(&state), 6);
         assert_eq!(UiMode::Horizontal.size(&state).1, base + 48);
+    }
+    #[test] fn network_and_disk_io_can_be_hidden_independently() {
+        let mut state = AppState::default();
+        assert_eq!(visible_row_count(&state), 4);
+        state.show_network = false;
+        assert_eq!(visible_row_count(&state), 3);
+        assert_eq!(UiMode::Horizontal.size(&state).1, 81);
+        state.show_disk_io = false;
+        assert_eq!(visible_row_count(&state), 2);
+        assert_eq!(UiMode::Horizontal.size(&state).1, 57);
+
     }
 }
